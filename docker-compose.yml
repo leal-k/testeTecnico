@@ -1,0 +1,60 @@
+# Infraestrutura local do testeTecnico.
+# A aplicação (Dockerfile + serviço "app") será adicionada em um passo posterior.
+# Valores com ${VAR:-padrão} podem ser sobrescritos por um arquivo .env.
+name: testetecnico
+
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-app}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-app}
+      POSTGRES_DB: ${POSTGRES_DB:-testetecnico}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-app} -d ${POSTGRES_DB:-testetecnico}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:latest
+    # start-dev: modo de desenvolvimento (H2 embutido, HTTP). Suficiente para o desafio.
+    # --import-realm importa os arquivos .json de /opt/keycloak/data/import ao iniciar.
+    command: start-dev --import-realm
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KC_ADMIN_USER:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KC_ADMIN_PASSWORD:-admin}
+      KC_HTTP_PORT: "8080"
+      KC_HEALTH_ENABLED: "true"
+    ports:
+      - "8080:8080"
+    volumes:
+      # ":z" é necessário no Fedora (SELinux) para o container ler a pasta do host.
+      - ./deploy/keycloak:/opt/keycloak/data/import:ro,z
+
+  ministack:
+    image: ministackorg/ministack:latest
+    ports:
+      - "4566:4566"
+
+  # Serviço de uso único: cria as filas FIFO e a DLQ no MiniStack e termina.
+  queue-init:
+    image: amazon/aws-cli:latest
+    depends_on:
+      - ministack
+    environment:
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_ENDPOINT_URL: http://ministack:4566
+    entrypoint: ["/bin/sh", "/init/init-queues.sh"]
+    volumes:
+      - ./deploy/aws:/init:ro,z
+    restart: "no"
+
+volumes:
+  pgdata:
