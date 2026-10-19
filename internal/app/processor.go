@@ -85,10 +85,11 @@ type Result struct {
 
 // Processor aplica operações financeiras com idempotência persistente.
 type Processor struct {
-	tm    TxManager
-	cfg   Config
-	now   func() time.Time
-	newID func() uuid.UUID
+	tm         TxManager
+	cfg        Config
+	now        func() time.Time
+	newID      func() uuid.UUID
+	onConflict func()
 }
 
 // NewProcessor cria o caso de uso. now e newID podem ser nil (usa o relógio
@@ -106,7 +107,14 @@ func NewProcessor(tm TxManager, cfg Config, now func() time.Time, newID func() u
 			return id
 		}
 	}
-	return &Processor{tm: tm, cfg: cfg, now: now, newID: newID}
+	return &Processor{tm: tm, cfg: cfg, now: now, newID: newID, onConflict: func() {}}
+}
+
+// OnConcurrencyConflict registra uma função chamada sempre que duas
+// requisições disputam a mesma operação e esta precisa ser refeita (métrica de
+// conflitos de concorrência).
+func (p *Processor) OnConcurrencyConflict(fn func()) {
+	p.onConflict = fn
 }
 
 // Process executa a operação em UMA transação de banco: trava a carteira,
@@ -127,6 +135,9 @@ func (p *Processor) Process(ctx context.Context, cmd ProcessCommand) (Result, er
 			result = r
 			return nil
 		})
+		if errors.Is(err, ErrConcurrentInsert) || errors.Is(err, ErrVersionConflict) {
+			p.onConflict()
+		}
 		if errors.Is(err, ErrConcurrentInsert) && attempt < maxConcurrentRetries {
 			continue
 		}

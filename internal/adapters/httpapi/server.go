@@ -65,6 +65,7 @@ type Deps struct {
 	Wallets        Wallets
 	Transactions   Transactions
 	Checks         []HealthCheck
+	Metrics        http.Handler // opcional: servido em GET /metrics
 	Logger         *slog.Logger
 	RequestTimeout time.Duration // padrão: 15s
 }
@@ -83,6 +84,9 @@ func NewHandler(d Deps) http.Handler {
 	// públicas
 	mux.HandleFunc("GET /health/live", s.live)
 	mux.HandleFunc("GET /health/ready", s.ready)
+	if d.Metrics != nil {
+		mux.Handle("GET /metrics", d.Metrics)
+	}
 	// autenticadas
 	mux.Handle("POST /wallets", s.authed(s.openWallet))
 	mux.Handle("GET /wallets/{walletId}", s.authed(s.getWallet))
@@ -194,9 +198,10 @@ func (s *server) logAccess(r *http.Request, status int, elapsed time.Duration, r
 	switch {
 	case status >= 500:
 		level = slog.LevelError
-	case strings.HasPrefix(r.URL.Path, "/health/") && status < 400:
-		// O Docker consulta a saúde a cada poucos segundos: em info, essas
-		// linhas esconderiam o resto. Falhas continuam visíveis.
+	case (strings.HasPrefix(r.URL.Path, "/health/") || r.URL.Path == "/metrics") && status < 400:
+		// O Docker consulta a saúde e o Prometheus coleta métricas a cada
+		// poucos segundos: em info, essas linhas esconderiam o resto. Falhas
+		// continuam visíveis.
 		level = slog.LevelDebug
 	}
 	s.d.Logger.Log(r.Context(), level, "http request", attrs...)

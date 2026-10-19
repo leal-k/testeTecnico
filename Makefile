@@ -1,7 +1,7 @@
 DATABASE_URL ?= postgres://app:app@localhost:5432/testetecnico?sslmode=disable
 GOOSE = goose -dir migrations postgres "$(DATABASE_URL)"
 
-.PHONY: up down logs ps infra migrate-up migrate-down migrate-reset migrate-status test test-short test-race vet fmt
+.PHONY: up down logs ps infra demo migrate-up migrate-down migrate-reset migrate-status test test-short test-race vet fmt
 
 # ---- ambiente completo ----
 up:
@@ -15,6 +15,10 @@ logs:
 
 ps:
 	docker compose ps
+
+# demonstração com as 3 instâncias (ambiente no ar)
+demo:
+	./scripts/demo-concurrency.sh
 
 # só a infraestrutura (Postgres, Keycloak, MiniStack e filas)
 infra:

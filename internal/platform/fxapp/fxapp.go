@@ -31,14 +31,16 @@ import (
 	"github.com/leal-k/testeTecnico/internal/adapters/postgres"
 	sqsadapter "github.com/leal-k/testeTecnico/internal/adapters/sqs"
 	"github.com/leal-k/testeTecnico/internal/app"
+	"github.com/leal-k/testeTecnico/internal/domain/event"
 	"github.com/leal-k/testeTecnico/internal/platform/config"
+	"github.com/leal-k/testeTecnico/internal/platform/metrics"
 )
 
 // Options devolve a aplicação completa.
 func Options(cfg config.Config) fx.Option {
 	return fx.Options(
 		fx.Supply(cfg),
-		fx.Provide(NewLogger, NewWorkers),
+		fx.Provide(NewLogger, NewWorkers, metrics.New),
 		fx.WithLogger(func(l *slog.Logger) fxevent.Logger {
 			// Eventos internos do Fx (cada hook executado) só em debug; os
 			// erros do Fx continuam em error.
@@ -95,6 +97,8 @@ var DatabaseModule = fx.Module("database",
 			return httpapi.HealthCheck{Name: "postgres", Check: pool.Ping}
 		}),
 	),
+	// Atraso da outbox, medido no banco a cada coleta de métricas.
+	fx.Invoke(func(m *metrics.Metrics, db *postgres.DB) { m.RegisterOutboxLag(db.OutboxLag) }),
 )
 
 // asHealthCheck coloca a verificação no grupo "health", lido pelo readiness.
@@ -163,24 +167,30 @@ var UseCasesModule = fx.Module("usecases",
 		NewProcessor,
 		NewWalletService,
 		app.NewTransactionReader,
-		func(p *app.Processor) httpapi.TransactionProcessor { return p },
-		func(p *app.Processor) app.PendingRetrier { return p },
+		// Cada porta de entrada recebe o caso de uso já medido pelas métricas.
+		func(p *app.Processor, m *metrics.Metrics) httpapi.TransactionProcessor {
+			return m.Instrument("http", p)
+		},
+		func(p *app.Processor, m *metrics.Metrics) app.PendingRetrier { return m.InstrumentRetrier(p) },
 		func(s *app.WalletService) httpapi.Wallets { return s },
 		func(r *app.TransactionReader) httpapi.Transactions { return r },
 	),
 )
 
-func NewProcessor(tm app.TxManager, cfg config.Config) *app.Processor {
-	return app.NewProcessor(tm, app.Config{
+func NewProcessor(tm app.TxManager, cfg config.Config, m *metrics.Metrics) *app.Processor {
+	p := app.NewProcessor(tm, app.Config{
 		ReferenceTTL: cfg.ReferenceTTL,
 		BackoffBase:  cfg.ReferenceBackoffBase,
 		BackoffMax:   cfg.ReferenceBackoffMax,
 	}, nil, nil)
+	p.OnConcurrencyConflict(m.ConcurrencyConflict)
+	return p
 }
 
-func NewWalletService(tm app.TxManager, q app.Queries, log *slog.Logger) *app.WalletService {
+func NewWalletService(tm app.TxManager, q app.Queries, log *slog.Logger, m *metrics.Metrics) *app.WalletService {
 	s := app.NewWalletService(tm, q, nil, nil)
 	s.OnDivergence(func(r app.Reconciliation) {
+		m.ReconciliationDivergence()
 		log.Error("reconciliation divergence",
 			"walletId", r.WalletID.String(),
 			"storedBalance", r.Stored.Amount(),
@@ -234,7 +244,7 @@ var OutboxModule = fx.Module("outbox",
 			return httpapi.HealthCheck{Name: "events-queue", Check: p.Ready}
 		}),
 	),
-	fx.Invoke(func(lc fx.Lifecycle, ws *Workers, log *slog.Logger, cfg config.Config, db *postgres.DB, pub *sqsadapter.Publisher) {
+	fx.Invoke(func(lc fx.Lifecycle, ws *Workers, log *slog.Logger, cfg config.Config, db *postgres.DB, pub *sqsadapter.Publisher, m *metrics.Metrics) {
 		// Identidade única por processo: com ela o banco sabe de quem é cada reserva.
 		owner := cfg.InstanceID + "-" + uuid.NewString()[:8]
 		relay := app.NewOutboxRelay(db, pub, owner, app.OutboxConfig{
@@ -245,12 +255,14 @@ var OutboxModule = fx.Module("outbox",
 			BackoffBase:    cfg.OutboxBackoffBase,
 			BackoffMax:     cfg.OutboxBackoffMax,
 		}, log)
+		relay.OnPublished(func(event.Event, int) { m.OutboxPublished() })
+		relay.OnFailed(func(event.Event, error) { m.OutboxFailed() })
 		StartWorker(lc, ws, log, "outbox-publisher", relay.Run)
 	}),
 )
 
-func NewSQSConsumer(cfg config.Config, log *slog.Logger, proc *app.Processor, client sqsadapter.Client) (*sqsadapter.Consumer, error) {
-	return sqsadapter.NewConsumer(client, proc, sqsadapter.Config{
+func NewSQSConsumer(cfg config.Config, log *slog.Logger, proc *app.Processor, client sqsadapter.Client, m *metrics.Metrics) (*sqsadapter.Consumer, error) {
+	c := sqsadapter.NewConsumer(client, m.Instrument("sqs", proc), sqsadapter.Config{
 		ConsumerName:      cfg.SQSConsumerName,
 		QueueName:         cfg.SQSQueueName,
 		DLQName:           cfg.SQSDLQName,
@@ -261,7 +273,9 @@ func NewSQSConsumer(cfg config.Config, log *slog.Logger, proc *app.Processor, cl
 		MaxReceives:       cfg.SQSMaxReceives,
 		RetryBase:         cfg.SQSRetryBase,
 		RetryMax:          cfg.SQSRetryMax,
-	}, log), nil
+	}, log)
+	c.OnOutcome(func(o sqsadapter.Outcome) { m.SQSOutcome(string(o)) })
+	return c, nil
 }
 
 // ---- HTTP -------------------------------------------------------------------
@@ -291,6 +305,7 @@ type httpParams struct {
 	Config       config.Config
 	Logger       *slog.Logger
 	Checks       []httpapi.HealthCheck `group:"health"`
+	Metrics      *metrics.Metrics
 	Auth         httpapi.Authenticator
 	Processor    httpapi.TransactionProcessor
 	Wallets      httpapi.Wallets
@@ -304,6 +319,7 @@ func NewHTTPServer(p httpParams) *HTTPServer {
 		Wallets:        p.Wallets,
 		Transactions:   p.Transactions,
 		Checks:         p.Checks,
+		Metrics:        p.Metrics.Handler(),
 		Logger:         p.Logger,
 		RequestTimeout: p.Config.RequestTimeout,
 	})

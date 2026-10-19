@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"flag"
+	"io"
 	"net/http"
 	"os"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -125,6 +127,16 @@ func TestLifecycle_StartsServesAndReleasesEverythingOnStop(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK || ready.Checks["postgres"] != "ok" {
 		t.Errorf("ready = %d %+v", resp.StatusCode, ready)
+	}
+	// métricas expostas, incluindo o atraso da outbox medido no banco
+	mresp, err := http.Get(base + "/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mbody, _ := io.ReadAll(mresp.Body)
+	mresp.Body.Close()
+	if mresp.StatusCode != http.StatusOK || !strings.Contains(string(mbody), "testetecnico_outbox_lag_seconds") {
+		t.Errorf("/metrics = %d, outbox lag present: %v", mresp.StatusCode, strings.Contains(string(mbody), "testetecnico_outbox_lag_seconds"))
 	}
 	// rota de negócio protegida pela autenticação
 	if code := get(t, base+"/wallets/"+uuid.NewString()); code != http.StatusUnauthorized {

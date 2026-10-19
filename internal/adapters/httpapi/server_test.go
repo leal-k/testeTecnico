@@ -705,6 +705,23 @@ func TestHealthChecks_DoNotFloodTheInfoLog(t *testing.T) {
 	}
 }
 
+func TestMetricsRoute_IsPublicWhenConfigured(t *testing.T) {
+	f := newFixture(t)
+	h := NewHandler(Deps{
+		Auth: fakeAuth{}, Processor: f.proc, Wallets: f.wallets, Transactions: f.txs,
+		Metrics: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("metric_x 1\n")) }),
+		Logger:  slog.New(slog.NewJSONHandler(f.logs, nil)),
+	})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "metric_x 1") {
+		t.Errorf("metrics: %d %q", rec.Code, rec.Body.String())
+	}
+	if f.logs.Len() != 0 {
+		t.Errorf("metric scrapes must not be logged at info")
+	}
+}
+
 func TestPanicIsRecovered(t *testing.T) {
 	f := newFixture(t)
 	h := NewHandler(Deps{
