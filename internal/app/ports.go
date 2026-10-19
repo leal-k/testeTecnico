@@ -36,6 +36,9 @@ type Store interface {
 	LockWallet(ctx context.Context, id uuid.UUID) (*wallet.Wallet, error)
 	// SaveWallet grava o novo saldo e a nova versão, conferindo a versão anterior.
 	SaveWallet(ctx context.Context, w *wallet.Wallet, expectedVersion int64) error
+	// InsertWallet grava uma carteira nova. Devolve false, sem erro, se já
+	// existir carteira para o mesmo (jogador, moeda).
+	InsertWallet(ctx context.Context, w *wallet.Wallet) (bool, error)
 
 	FindTransactionByKey(ctx context.Context, providerID, idempotencyKey string) (*wager.Transaction, error)
 	FindTransactionByExternalID(ctx context.Context, providerID, externalID string) (*wager.Transaction, error)

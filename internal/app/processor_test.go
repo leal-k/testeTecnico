@@ -115,6 +115,22 @@ func (s *fakeStore) SaveWallet(ctx context.Context, w *wallet.Wallet, expectedVe
 	return nil
 }
 
+func (s *fakeStore) InsertWallet(ctx context.Context, w *wallet.Wallet) (bool, error) {
+	for _, row := range s.db.wallets {
+		if row.playerID == w.PlayerID() && row.balance.Currency() == w.Currency() {
+			return false, nil
+		}
+	}
+	s.db.wallets[w.ID()] = walletRow{
+		playerID: w.PlayerID(),
+		balance:  w.Balance(),
+		version:  w.Version(),
+		created:  w.CreatedAt(),
+		updated:  w.UpdatedAt(),
+	}
+	return true, nil
+}
+
 func (s *fakeStore) find(match func(wager.Snapshot) bool) (*wager.Transaction, error) {
 	for _, snap := range s.db.txs {
 		if match(snap) {

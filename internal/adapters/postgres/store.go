@@ -80,6 +80,21 @@ func (s *store) SaveWallet(ctx context.Context, w *wallet.Wallet, expectedVersio
 	return nil
 }
 
+// InsertWallet grava a carteira. ON CONFLICT DO NOTHING (sem alvo) cobre a
+// unicidade de (player_id, currency): uma segunda abertura não insere nada.
+func (s *store) InsertWallet(ctx context.Context, w *wallet.Wallet) (bool, error) {
+	tag, err := s.tx.Exec(ctx, `
+		INSERT INTO wallets (id, player_id, currency, balance_minor, version, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		ON CONFLICT DO NOTHING`,
+		w.ID(), w.PlayerID(), w.Currency().String(), w.Balance().Minor(),
+		w.Version(), w.CreatedAt(), w.UpdatedAt())
+	if err != nil {
+		return false, fmt.Errorf("postgres: inserting wallet: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
 func (s *store) FindTransactionByKey(ctx context.Context, providerID, idempotencyKey string) (*wager.Transaction, error) {
 	return scanTransaction(s.tx.QueryRow(ctx,
 		`SELECT `+transactionColumns+` FROM wager_transactions WHERE provider_id = $1 AND idempotency_key = $2`,
