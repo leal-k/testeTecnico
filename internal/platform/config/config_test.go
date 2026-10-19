@@ -44,6 +44,24 @@ func TestLoad_Overrides(t *testing.T) {
 	}
 }
 
+func TestLoad_SQSDefaultsAndDisabling(t *testing.T) {
+	cfg, err := load(env(minimal()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.SQSEnabled || cfg.SQSQueueName != "wager-transactions.fifo" || cfg.SQSDLQName != "wager-transactions-dlq.fifo" ||
+		cfg.SQSMaxReceives != 5 || cfg.SQSVisibilityTimeout != 60*time.Second {
+		t.Errorf("SQS defaults = %+v", cfg)
+	}
+
+	v := minimal()
+	v["SQS_ENABLED"] = "false"
+	v["SQS_WAIT_TIME"] = "999s" // ignorado com o consumidor desligado
+	if cfg, err := load(env(v)); err != nil || cfg.SQSEnabled {
+		t.Errorf("disabled SQS: %+v, %v", cfg.SQSEnabled, err)
+	}
+}
+
 func TestLoad_ReportsEveryProblemAtOnce(t *testing.T) {
 	_, err := load(env(map[string]string{
 		"REFERENCE_TTL": "five minutes",
@@ -61,11 +79,16 @@ func TestLoad_ReportsEveryProblemAtOnce(t *testing.T) {
 
 func TestLoad_InvalidValues(t *testing.T) {
 	tests := map[string]map[string]string{
-		"bad URL":             {"DATABASE_URL": "not a url"},
-		"bad log level":       {"LOG_LEVEL": "loud"},
-		"zero interval":       {"PENDING_WORKER_INTERVAL": "0s"},
-		"backoff base > max":  {"REFERENCE_BACKOFF_BASE": "2m", "REFERENCE_BACKOFF_MAX": "1m"},
-		"too few connections": {"DB_MAX_CONNS": "1"},
+		"bad URL":              {"DATABASE_URL": "not a url"},
+		"bad log level":        {"LOG_LEVEL": "loud"},
+		"zero interval":        {"PENDING_WORKER_INTERVAL": "0s"},
+		"backoff base > max":   {"REFERENCE_BACKOFF_BASE": "2m", "REFERENCE_BACKOFF_MAX": "1m"},
+		"too few connections":  {"DB_MAX_CONNS": "1"},
+		"long poll above 20s":  {"SQS_WAIT_TIME": "30s"},
+		"visibility <= handle": {"SQS_VISIBILITY_TIMEOUT": "10s", "SQS_HANDLE_TIMEOUT": "10s"},
+		"shutdown <= handle":   {"SHUTDOWN_TIMEOUT": "5s", "SQS_HANDLE_TIMEOUT": "10s"},
+		"too many messages":    {"SQS_MAX_MESSAGES": "11"},
+		"bad boolean":          {"SQS_ENABLED": "maybe"},
 	}
 	for name, overrides := range tests {
 		t.Run(name, func(t *testing.T) {

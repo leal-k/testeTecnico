@@ -75,6 +75,18 @@ func TestGraphIsValid(t *testing.T) {
 	}
 }
 
+func TestGraphIsValid_WithTheSQSConsumer(t *testing.T) {
+	cfg := testConfig("postgres://app:app@127.0.0.1:1/x")
+	cfg.SQSEnabled = true
+	cfg.AWSRegion = "us-east-1"
+	cfg.SQSEndpointURL = "http://127.0.0.1:1"
+	cfg.SQSQueueName = "wager-transactions.fifo"
+	cfg.SQSDLQName = "wager-transactions-dlq.fifo"
+	if err := fx.ValidateApp(fxapp.Options(cfg)); err != nil {
+		t.Fatalf("invalid dependency graph with SQS: %v", err)
+	}
+}
+
 func TestStartFailsFastWhenTheDatabaseIsUnreachable(t *testing.T) {
 	application := fx.New(fxapp.Options(testConfig("postgres://app:app@127.0.0.1:1/x?sslmode=disable&connect_timeout=2")))
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)

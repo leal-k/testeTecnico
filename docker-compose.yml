@@ -16,6 +16,12 @@ x-app-env: &app-env
   AUTH_AUDIENCE: testetecnico-api
   LOG_LEVEL: ${LOG_LEVEL:-info}
   REFERENCE_TTL: ${REFERENCE_TTL:-5m}
+  # SQS local (MiniStack). Credenciais de desenvolvimento, sem valor real.
+  SQS_ENABLED: "true"
+  SQS_ENDPOINT_URL: http://ministack:4566
+  AWS_REGION: us-east-1
+  AWS_ACCESS_KEY_ID: ${SQS_ACCESS_KEY_ID:-test}
+  AWS_SECRET_ACCESS_KEY: ${SQS_SECRET_ACCESS_KEY:-test}
 
 services:
   postgres:

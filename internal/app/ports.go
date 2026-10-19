@@ -54,6 +54,18 @@ type Store interface {
 
 	InsertLedgerEntry(ctx context.Context, e ledger.Entry) error
 	AddOutboxEvent(ctx context.Context, e event.Event) error
+
+	// RecordInbox registra a mensagem recebida como tratada. Se o par
+	// (consumidor, messageId) já existir, não grava nada e devolve false com o
+	// hash guardado da primeira vez.
+	RecordInbox(ctx context.Context, rec InboxRecord, at time.Time) (inserted bool, storedHash string, err error)
+}
+
+// InboxRecord identifica uma mensagem de entrada para a deduplicação durável.
+type InboxRecord struct {
+	Consumer    string
+	MessageID   string
+	PayloadHash string
 }
 
 // TxManager executa fn dentro de uma transação de banco: confirma se fn

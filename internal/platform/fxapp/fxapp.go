@@ -3,8 +3,10 @@
 // controlados pelo fx.Lifecycle.
 //
 // Ordem de encerramento (o Fx executa os OnStop na ordem inversa dos OnStart):
-//  1. servidor HTTP: para de aceitar conexões e espera as requisições em curso;
-//  2. workers: param de buscar trabalho e terminam a transação em andamento;
+//  1. entradas: o servidor HTTP para de aceitar conexões e espera as
+//     requisições em curso; o consumidor SQS para de buscar mensagens,
+//     termina a que está tratando e devolve as outras à fila;
+//  2. worker de referências pendentes: termina a transação em andamento;
 //  3. pool do PostgreSQL: fechado por último, depois de quem o usa.
 package fxapp
 
@@ -26,6 +28,7 @@ import (
 	"github.com/leal-k/testeTecnico/internal/adapters/auth"
 	"github.com/leal-k/testeTecnico/internal/adapters/httpapi"
 	"github.com/leal-k/testeTecnico/internal/adapters/postgres"
+	sqsadapter "github.com/leal-k/testeTecnico/internal/adapters/sqs"
 	"github.com/leal-k/testeTecnico/internal/app"
 	"github.com/leal-k/testeTecnico/internal/platform/config"
 )
@@ -48,9 +51,19 @@ func Options(cfg config.Config) fx.Option {
 		DatabaseModule,
 		AuthModule,
 		UseCasesModule,
-		WorkersModule, // antes do HTTP: no encerramento, o HTTP para primeiro
+		// A ordem dos módulos define a ordem de encerramento (inversa):
+		// HTTP, depois SQS, depois o worker de pendências, por fim o banco.
+		WorkersModule,
+		sqsModule(cfg),
 		HTTPModule,
 	)
+}
+
+func sqsModule(cfg config.Config) fx.Option {
+	if !cfg.SQSEnabled {
+		return fx.Options()
+	}
+	return SQSModule
 }
 
 // NewLogger cria o logger JSON da aplicação.
@@ -71,8 +84,16 @@ var DatabaseModule = fx.Module("database",
 		func(db *postgres.DB) app.TxManager { return db },
 		func(db *postgres.DB) app.PendingLister { return db },
 		func(q *postgres.Queries) app.Queries { return q },
+		asHealthCheck(func(pool *pgxpool.Pool) httpapi.HealthCheck {
+			return httpapi.HealthCheck{Name: "postgres", Check: pool.Ping}
+		}),
 	),
 )
+
+// asHealthCheck coloca a verificação no grupo "health", lido pelo readiness.
+func asHealthCheck(f any) any {
+	return fx.Annotate(f, fx.ResultTags(`group:"health"`))
+}
 
 // NewPool cria o pool de conexões. No início, confere que o banco responde
 // (falha rápida); no encerramento, fecha as conexões.
@@ -173,6 +194,42 @@ var WorkersModule = fx.Module("workers",
 	}),
 )
 
+// ---- SQS --------------------------------------------------------------------
+
+var SQSModule = fx.Module("sqs",
+	fx.Provide(
+		NewSQSConsumer,
+		asHealthCheck(func(c *sqsadapter.Consumer) httpapi.HealthCheck {
+			return httpapi.HealthCheck{Name: "sqs", Check: c.Ready}
+		}),
+	),
+	fx.Invoke(func(lc fx.Lifecycle, ws *Workers, log *slog.Logger, c *sqsadapter.Consumer) {
+		StartWorker(lc, ws, log, "sqs-consumer", c.Run)
+	}),
+)
+
+func NewSQSConsumer(cfg config.Config, log *slog.Logger, proc *app.Processor) (*sqsadapter.Consumer, error) {
+	client, err := sqsadapter.NewClient(context.Background(), sqsadapter.ClientConfig{
+		Region:   cfg.AWSRegion,
+		Endpoint: cfg.SQSEndpointURL,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return sqsadapter.NewConsumer(client, proc, sqsadapter.Config{
+		ConsumerName:      cfg.SQSConsumerName,
+		QueueName:         cfg.SQSQueueName,
+		DLQName:           cfg.SQSDLQName,
+		WaitTime:          cfg.SQSWaitTime,
+		MaxMessages:       int32(cfg.SQSMaxMessages),
+		VisibilityTimeout: cfg.SQSVisibilityTimeout,
+		HandleTimeout:     cfg.SQSHandleTimeout,
+		MaxReceives:       cfg.SQSMaxReceives,
+		RetryBase:         cfg.SQSRetryBase,
+		RetryMax:          cfg.SQSRetryMax,
+	}, log), nil
+}
+
 // ---- HTTP -------------------------------------------------------------------
 
 var HTTPModule = fx.Module("http",
@@ -199,7 +256,7 @@ type httpParams struct {
 	Lifecycle    fx.Lifecycle
 	Config       config.Config
 	Logger       *slog.Logger
-	Pool         *pgxpool.Pool
+	Checks       []httpapi.HealthCheck `group:"health"`
 	Auth         httpapi.Authenticator
 	Processor    httpapi.TransactionProcessor
 	Wallets      httpapi.Wallets
@@ -208,13 +265,11 @@ type httpParams struct {
 
 func NewHTTPServer(p httpParams) *HTTPServer {
 	handler := httpapi.NewHandler(httpapi.Deps{
-		Auth:         p.Auth,
-		Processor:    p.Processor,
-		Wallets:      p.Wallets,
-		Transactions: p.Transactions,
-		Checks: []httpapi.HealthCheck{
-			{Name: "postgres", Check: p.Pool.Ping},
-		},
+		Auth:           p.Auth,
+		Processor:      p.Processor,
+		Wallets:        p.Wallets,
+		Transactions:   p.Transactions,
+		Checks:         p.Checks,
 		Logger:         p.Logger,
 		RequestTimeout: p.Config.RequestTimeout,
 	})

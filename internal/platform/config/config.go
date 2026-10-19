@@ -32,6 +32,20 @@ type Config struct {
 	ReferenceTTL          time.Duration
 	ReferenceBackoffBase  time.Duration
 	ReferenceBackoffMax   time.Duration
+
+	SQSEnabled           bool
+	AWSRegion            string
+	SQSEndpointURL       string
+	SQSQueueName         string
+	SQSDLQName           string
+	SQSConsumerName      string
+	SQSWaitTime          time.Duration
+	SQSVisibilityTimeout time.Duration
+	SQSHandleTimeout     time.Duration
+	SQSMaxMessages       int
+	SQSMaxReceives       int
+	SQSRetryBase         time.Duration
+	SQSRetryMax          time.Duration
 }
 
 // Load lê o ambiente. Toda variável tem um padrão de desenvolvimento, menos as
@@ -64,6 +78,20 @@ func load(getenv func(string) string) (Config, error) {
 		ReferenceTTL:          r.duration("REFERENCE_TTL", 5*time.Minute),
 		ReferenceBackoffBase:  r.duration("REFERENCE_BACKOFF_BASE", time.Second),
 		ReferenceBackoffMax:   r.duration("REFERENCE_BACKOFF_MAX", time.Minute),
+
+		SQSEnabled:           r.boolean("SQS_ENABLED", true),
+		AWSRegion:            r.str("AWS_REGION", "us-east-1"),
+		SQSEndpointURL:       r.str("SQS_ENDPOINT_URL", ""),
+		SQSQueueName:         r.str("SQS_QUEUE_NAME", "wager-transactions.fifo"),
+		SQSDLQName:           r.str("SQS_DLQ_NAME", "wager-transactions-dlq.fifo"),
+		SQSConsumerName:      r.str("SQS_CONSUMER_NAME", "wager-transactions-consumer"),
+		SQSWaitTime:          r.duration("SQS_WAIT_TIME", 10*time.Second),
+		SQSVisibilityTimeout: r.duration("SQS_VISIBILITY_TIMEOUT", 60*time.Second),
+		SQSHandleTimeout:     r.duration("SQS_HANDLE_TIMEOUT", 15*time.Second),
+		SQSMaxMessages:       r.integer("SQS_MAX_MESSAGES", 10),
+		SQSMaxReceives:       r.integer("SQS_MAX_RECEIVES", 5),
+		SQSRetryBase:         r.duration("SQS_RETRY_BASE", 2*time.Second),
+		SQSRetryMax:          r.duration("SQS_RETRY_MAX", time.Minute),
 	}
 	if len(r.errs) > 0 {
 		return Config{}, errors.Join(r.errs...)
@@ -102,6 +130,26 @@ func (c Config) validate() error {
 	check(c.ReferenceTTL > 0, "REFERENCE_TTL must be positive")
 	check(c.ReferenceBackoffBase > 0 && c.ReferenceBackoffMax >= c.ReferenceBackoffBase,
 		"REFERENCE_BACKOFF_BASE must be positive and not larger than REFERENCE_BACKOFF_MAX")
+
+	if c.SQSEnabled {
+		if c.SQSEndpointURL != "" {
+			u, err := url.Parse(c.SQSEndpointURL)
+			check(err == nil && u.Scheme != "" && u.Host != "", "SQS_ENDPOINT_URL is not a valid URL")
+		}
+		check(c.SQSWaitTime >= 0 && c.SQSWaitTime <= 20*time.Second, "SQS_WAIT_TIME must be between 0s and 20s")
+		check(c.SQSMaxMessages >= 1 && c.SQSMaxMessages <= 10, "SQS_MAX_MESSAGES must be between 1 and 10")
+		check(c.SQSMaxReceives >= 1, "SQS_MAX_RECEIVES must be at least 1")
+		check(c.SQSHandleTimeout > 0, "SQS_HANDLE_TIMEOUT must be positive")
+		// A mensagem não pode reaparecer para outra instância enquanto ainda
+		// está sendo tratada aqui.
+		check(c.SQSVisibilityTimeout > c.SQSHandleTimeout,
+			"SQS_VISIBILITY_TIMEOUT must be larger than SQS_HANDLE_TIMEOUT")
+		// O encerramento precisa caber a mensagem em andamento.
+		check(c.ShutdownTimeout > c.SQSHandleTimeout,
+			"SHUTDOWN_TIMEOUT must be larger than SQS_HANDLE_TIMEOUT")
+		check(c.SQSRetryBase > 0 && c.SQSRetryMax >= c.SQSRetryBase,
+			"SQS_RETRY_BASE must be positive and not larger than SQS_RETRY_MAX")
+	}
 	return errors.Join(errs...)
 }
 
@@ -136,6 +184,19 @@ func (r *reader) duration(key string, def time.Duration) time.Duration {
 		return def
 	}
 	return d
+}
+
+func (r *reader) boolean(key string, def bool) bool {
+	v := strings.TrimSpace(r.getenv(key))
+	if v == "" {
+		return def
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		r.errs = append(r.errs, fmt.Errorf("%s must be true or false", key))
+		return def
+	}
+	return b
 }
 
 func (r *reader) integer(key string, def int) int {

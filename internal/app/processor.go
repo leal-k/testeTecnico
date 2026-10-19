@@ -24,6 +24,8 @@ var (
 	ErrIdempotencyConflict = errors.New("app: idempotency key reused with a different payload")
 	// Mesmo (provedor, externalId) com outra chave de idempotência.
 	ErrExternalIDConflict = errors.New("app: external transaction id already used with another idempotency key")
+	// Mesmo messageId de entrada com conteúdo diferente do já tratado.
+	ErrInboxConflict = errors.New("app: message id reused with a different payload")
 )
 
 const maxConcurrentRetries = 3
@@ -60,6 +62,10 @@ type ProcessCommand struct {
 	ReferenceExternalID string
 	CorrelationID       string
 	CausationID         string
+	// Inbox, quando presente (entrada por SQS), é gravada na MESMA transação
+	// da operação: a mensagem só conta como tratada se a operação também
+	// foi confirmada.
+	Inbox *InboxRecord
 }
 
 // Result é o resultado persistido da operação.
@@ -72,6 +78,9 @@ type Result struct {
 	// Replay indica que a resposta veio de uma execução anterior da mesma
 	// operação, sem reaplicar nada.
 	Replay bool
+	// DuplicateMessage indica que a mesma mensagem de entrada (messageId) já
+	// tinha sido tratada antes.
+	DuplicateMessage bool
 }
 
 // Processor aplica operações financeiras com idempotência persistente.
@@ -131,6 +140,35 @@ func (p *Processor) Process(ctx context.Context, cmd ProcessCommand) (Result, er
 func (p *Processor) process(ctx context.Context, st Store, cmd ProcessCommand) (Result, error) {
 	now := p.now()
 
+	// 0. Inbox (só na entrada por SQS). Fica antes do lock da carteira: com
+	// essa ordem fixa, duas entregas da mesma mensagem em instâncias
+	// diferentes nunca se travam mutuamente (a segunda espera a primeira no
+	// INSERT da inbox e depois enxerga o registro dela).
+	duplicate := false
+	if cmd.Inbox != nil {
+		inserted, storedHash, err := st.RecordInbox(ctx, *cmd.Inbox, now)
+		if err != nil {
+			return Result{}, err
+		}
+		if !inserted {
+			if storedHash != cmd.Inbox.PayloadHash {
+				return Result{}, ErrInboxConflict
+			}
+			// Mesma mensagem de novo: segue normalmente, e a idempotência
+			// abaixo devolve o resultado gravado, sem reaplicar nada.
+			duplicate = true
+		}
+	}
+
+	res, err := p.apply(ctx, st, cmd, now)
+	if err != nil {
+		return Result{}, err
+	}
+	res.DuplicateMessage = duplicate
+	return res, nil
+}
+
+func (p *Processor) apply(ctx context.Context, st Store, cmd ProcessCommand, now time.Time) (Result, error) {
 	// 1. Trava a carteira ANTES de qualquer INSERT que a referencie. Assim duas
 	// operações da mesma carteira nunca se cruzam (e não há deadlock entre a
 	// chave estrangeira e o FOR UPDATE).

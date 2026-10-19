@@ -46,6 +46,7 @@ type fakeDB struct {
 	txs     map[uuid.UUID]wager.Snapshot
 	entries []ledger.Entry
 	outbox  []event.Event
+	inbox   map[string]string // consumer|messageId -> hash
 	ctl     *fakeControl
 }
 
@@ -53,6 +54,7 @@ func newFakeDB() *fakeDB {
 	return &fakeDB{
 		wallets: map[uuid.UUID]walletRow{},
 		txs:     map[uuid.UUID]wager.Snapshot{},
+		inbox:   map[string]string{},
 		ctl:     &fakeControl{},
 	}
 }
@@ -63,6 +65,7 @@ func (db *fakeDB) clone() *fakeDB {
 		txs:     make(map[uuid.UUID]wager.Snapshot, len(db.txs)),
 		entries: append([]ledger.Entry(nil), db.entries...),
 		outbox:  append([]event.Event(nil), db.outbox...),
+		inbox:   make(map[string]string, len(db.inbox)),
 		ctl:     db.ctl,
 	}
 	for k, v := range db.wallets {
@@ -70,6 +73,9 @@ func (db *fakeDB) clone() *fakeDB {
 	}
 	for k, v := range db.txs {
 		c.txs[k] = v
+	}
+	for k, v := range db.inbox {
+		c.inbox[k] = v
 	}
 	return c
 }
@@ -227,6 +233,15 @@ func (s *fakeStore) InsertLedgerEntry(ctx context.Context, e ledger.Entry) error
 func (s *fakeStore) AddOutboxEvent(ctx context.Context, e event.Event) error {
 	s.db.outbox = append(s.db.outbox, e)
 	return nil
+}
+
+func (s *fakeStore) RecordInbox(ctx context.Context, rec InboxRecord, at time.Time) (bool, string, error) {
+	key := rec.Consumer + "|" + rec.MessageID
+	if hash, ok := s.db.inbox[key]; ok {
+		return false, hash, nil
+	}
+	s.db.inbox[key] = rec.PayloadHash
+	return true, "", nil
 }
 
 // ---- fixture e auxiliares ---------------------------------------------------
@@ -678,6 +693,83 @@ func TestRetryPending_IgnoresUnknownAndFinishedTransactions(t *testing.T) {
 
 	if f.db.txs[res.TransactionID].Status != wager.StatusProcessed || len(f.db.outbox) != outboxBefore {
 		t.Errorf("retry touched a finished transaction")
+	}
+}
+
+func withInbox(c ProcessCommand, messageID, hash string) ProcessCommand {
+	c.Inbox = &InboxRecord{Consumer: "wager-transactions", MessageID: messageID, PayloadHash: hash}
+	return c
+}
+
+func TestProcess_Inbox_RecordedTogetherWithTheOperation(t *testing.T) {
+	f := newFixture(t, "100.00")
+	res := f.process(withInbox(f.cmd(wager.KindBet, "10.00", "ext-1", "key-1"), "msg-1", "h1"))
+
+	if res.Status != wager.StatusProcessed || res.DuplicateMessage {
+		t.Errorf("result = %+v", res)
+	}
+	if f.db.inbox["wager-transactions|msg-1"] != "h1" {
+		t.Errorf("inbox = %v", f.db.inbox)
+	}
+}
+
+func TestProcess_Inbox_RedeliveryIsADuplicateWithoutReapplying(t *testing.T) {
+	f := newFixture(t, "100.00")
+	cmd := withInbox(f.cmd(wager.KindBet, "10.00", "ext-1", "key-1"), "msg-1", "h1")
+
+	first := f.process(cmd)
+	second := f.process(cmd)
+
+	if !second.DuplicateMessage || !second.Replay || second.TransactionID != first.TransactionID {
+		t.Errorf("redelivery = %+v", second)
+	}
+	if f.balance() != "90.00" || len(f.db.entries) != 1 {
+		t.Errorf("redelivery debited again: %s entries=%d", f.balance(), len(f.db.entries))
+	}
+}
+
+func TestProcess_Inbox_SameMessageIDWithAnotherPayloadIsAConflict(t *testing.T) {
+	f := newFixture(t, "100.00")
+	f.process(withInbox(f.cmd(wager.KindBet, "10.00", "ext-1", "key-1"), "msg-1", "h1"))
+
+	_, err := f.proc.Process(context.Background(), withInbox(f.cmd(wager.KindBet, "20.00", "ext-2", "key-2"), "msg-1", "h2"))
+	if !errors.Is(err, ErrInboxConflict) {
+		t.Errorf("error = %v, want ErrInboxConflict", err)
+	}
+	if f.balance() != "90.00" || len(f.db.txs) != 1 {
+		t.Errorf("the conflicting message changed state: %s txs=%d", f.balance(), len(f.db.txs))
+	}
+}
+
+func TestProcess_Inbox_IsRolledBackWhenTheOperationFails(t *testing.T) {
+	f := newFixture(t, "100.00")
+	f.db.ctl.failLedger = errors.New("disk full")
+	cmd := withInbox(f.cmd(wager.KindBet, "10.00", "ext-1", "key-1"), "msg-1", "h1")
+
+	if _, err := f.proc.Process(context.Background(), cmd); err == nil {
+		t.Fatal("expected the failure")
+	}
+	if len(f.db.inbox) != 0 {
+		t.Errorf("the inbox kept a message whose operation was rolled back: %v", f.db.inbox)
+	}
+
+	// Na reentrega, com o banco de volta, a mensagem é tratada normalmente.
+	f.db.ctl.failLedger = nil
+	if res := f.process(cmd); res.Status != wager.StatusProcessed || res.DuplicateMessage {
+		t.Errorf("redelivery after the failure = %+v", res)
+	}
+}
+
+func TestProcess_Inbox_SameOperationFromHTTPAndSQS(t *testing.T) {
+	f := newFixture(t, "100.00")
+	viaHTTP := f.process(f.cmd(wager.KindBet, "10.00", "ext-1", "key-1"))
+	viaSQS := f.process(withInbox(f.cmd(wager.KindBet, "10.00", "ext-1", "key-1"), "msg-1", "h1"))
+
+	if !viaSQS.Replay || viaSQS.DuplicateMessage || viaSQS.TransactionID != viaHTTP.TransactionID {
+		t.Errorf("SQS after HTTP = %+v", viaSQS)
+	}
+	if f.balance() != "90.00" {
+		t.Errorf("balance = %s, want a single debit", f.balance())
 	}
 }
 

@@ -236,6 +236,31 @@ func (s *store) AddOutboxEvent(ctx context.Context, e event.Event) error {
 	return nil
 }
 
+// RecordInbox grava a mensagem como recebida e concluída (as duas coisas na
+// transação da operação). Se outra transação concorrente estiver gravando o
+// mesmo (consumidor, messageId), o INSERT espera o desfecho dela.
+func (s *store) RecordInbox(ctx context.Context, rec app.InboxRecord, at time.Time) (bool, string, error) {
+	tag, err := s.tx.Exec(ctx, `
+		INSERT INTO inbox_messages (consumer_name, message_id, payload_hash, received_at, completed_at)
+		VALUES ($1, $2, $3, $4, $4)
+		ON CONFLICT (consumer_name, message_id) DO NOTHING`,
+		rec.Consumer, rec.MessageID, rec.PayloadHash, at)
+	if err != nil {
+		return false, "", fmt.Errorf("postgres: recording inbox message: %w", err)
+	}
+	if tag.RowsAffected() == 1 {
+		return true, "", nil
+	}
+	var stored string
+	err = s.tx.QueryRow(ctx,
+		`SELECT payload_hash FROM inbox_messages WHERE consumer_name = $1 AND message_id = $2`,
+		rec.Consumer, rec.MessageID).Scan(&stored)
+	if err != nil {
+		return false, "", fmt.Errorf("postgres: reading inbox message: %w", err)
+	}
+	return false, stored, nil
+}
+
 // scanTransaction lê uma linha de wager_transactions (colunas na ordem de
 // transactionColumns) e a reidrata no domínio.
 func scanTransaction(row pgx.Row) (*wager.Transaction, error) {
