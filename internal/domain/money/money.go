@@ -143,7 +143,7 @@ func (m Money) Amount() string {
 	negative := m.minor < 0
 	if negative {
 		// -(minor+1)+1 evita overflow para math.MinInt64.
-		abs = uint64(-(m.minor+1)) + 1
+		abs = uint64(-(m.minor + 1)) + 1
 	} else {
 		abs = uint64(m.minor)
 	}
