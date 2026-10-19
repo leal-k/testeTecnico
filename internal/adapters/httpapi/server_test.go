@@ -686,6 +686,25 @@ func TestAccessLog_IsJSONWithIdentifiersAndNoSecrets(t *testing.T) {
 	}
 }
 
+func TestHealthChecks_DoNotFloodTheInfoLog(t *testing.T) {
+	f := newFixture(t)
+	f.checks = []HealthCheck{{Name: "postgres", Check: func(context.Context) error { return nil }}}
+	for i := 0; i < 5; i++ {
+		f.do(call{method: "GET", path: "/health/live"})
+		f.do(call{method: "GET", path: "/health/ready"})
+	}
+	if f.logs.Len() != 0 {
+		t.Errorf("successful health checks were logged at info:\n%s", f.logs.String())
+	}
+
+	// uma falha de readiness continua aparecendo
+	f.checks = []HealthCheck{{Name: "postgres", Check: func(context.Context) error { return errors.New("down") }}}
+	f.do(call{method: "GET", path: "/health/ready"})
+	if !strings.Contains(f.logs.String(), "readiness check failed") {
+		t.Errorf("a failing readiness check must be logged:\n%s", f.logs.String())
+	}
+}
+
 func TestPanicIsRecovered(t *testing.T) {
 	f := newFixture(t)
 	h := NewHandler(Deps{

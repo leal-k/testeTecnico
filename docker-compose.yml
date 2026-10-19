@@ -1,11 +1,26 @@
-# Infraestrutura local do testeTecnico.
-# A aplicação (Dockerfile + serviço "app") será adicionada em um passo posterior.
-# Valores com ${VAR:-padrão} podem ser sobrescritos por um arquivo .env.
+# Ambiente local completo do testeTecnico: infraestrutura + aplicação.
+#
+#   docker compose up --build        sobe tudo (3 instâncias da aplicação)
+#
+# Valores com ${VAR:-padrão} podem ser sobrescritos por um arquivo .env
+# (veja .env.example).
 name: testetecnico
+
+x-app-env: &app-env
+  DATABASE_URL: postgres://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:-app}@postgres:5432/${POSTGRES_DB:-testetecnico}?sslmode=disable
+  # O emissor dos tokens é sempre http://localhost:8080 (KC_HOSTNAME abaixo),
+  # mesmo quando o token é pedido de dentro da rede do Compose.
+  AUTH_ISSUER_URL: http://localhost:8080/realms/testetecnico
+  # As chaves públicas são buscadas pela rede interna.
+  AUTH_JWKS_URL: http://keycloak:8080/realms/testetecnico/protocol/openid-connect/certs
+  AUTH_AUDIENCE: testetecnico-api
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+  REFERENCE_TTL: ${REFERENCE_TTL:-5m}
 
 services:
   postgres:
     image: postgres:17
+    restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-app}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-app}
@@ -22,6 +37,7 @@ services:
 
   keycloak:
     image: quay.io/keycloak/keycloak:latest
+    restart: unless-stopped
     # start-dev: modo de desenvolvimento (H2 embutido, HTTP). Suficiente para o desafio.
     # --import-realm importa os arquivos .json de /opt/keycloak/data/import ao iniciar.
     command: start-dev --import-realm
@@ -30,6 +46,9 @@ services:
       KC_BOOTSTRAP_ADMIN_PASSWORD: ${KC_ADMIN_PASSWORD:-admin}
       KC_HTTP_PORT: "8080"
       KC_HEALTH_ENABLED: "true"
+      # Fixa o emissor ("iss") dos tokens, venham de onde vierem as requisições.
+      KC_HOSTNAME: http://localhost:8080
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
     ports:
       - "8080:8080"
     volumes:
@@ -38,10 +57,11 @@ services:
 
   ministack:
     image: ministackorg/ministack:latest
+    restart: unless-stopped
     ports:
       - "4566:4566"
 
-  # Serviço de uso único: cria as filas FIFO e a DLQ no MiniStack e termina.
+  # Uso único: cria as filas FIFO e a DLQ no MiniStack e termina.
   queue-init:
     image: amazon/aws-cli:latest
     depends_on:
@@ -55,6 +75,50 @@ services:
     volumes:
       - ./deploy/aws:/init:ro,z
     restart: "no"
+
+  # Uso único: aplica as migrations (com lock, seguro mesmo se rodar em paralelo).
+  migrate:
+    build: .
+    image: testetecnico-app:local
+    command: ["migrate", "up"]
+    environment:
+      <<: *app-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  # A aplicação: API HTTP + workers. Três instâncias independentes, cada uma
+  # com seu processo, suas conexões e sua memória; só o banco é compartilhado.
+  app:
+    build: .
+    image: testetecnico-app:local
+    deploy:
+      replicas: ${APP_REPLICAS:-3}
+    environment:
+      <<: *app-env
+    ports:
+      # uma porta do host por instância: 8081, 8082, 8083
+      - "8081-8083:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      queue-init:
+        condition: service_completed_successfully
+      keycloak:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "/app", "healthcheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    # Maior que SHUTDOWN_TIMEOUT (20s): dá tempo ao encerramento organizado
+    # antes do Docker matar o processo.
+    stop_grace_period: 30s
+    restart: unless-stopped
 
 volumes:
   pgdata:

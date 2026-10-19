@@ -191,8 +191,13 @@ func (s *server) logAccess(r *http.Request, status int, elapsed time.Duration, r
 	ri.mu.Unlock()
 
 	level := slog.LevelInfo
-	if status >= 500 {
+	switch {
+	case status >= 500:
 		level = slog.LevelError
+	case strings.HasPrefix(r.URL.Path, "/health/") && status < 400:
+		// O Docker consulta a saúde a cada poucos segundos: em info, essas
+		// linhas esconderiam o resto. Falhas continuam visíveis.
+		level = slog.LevelDebug
 	}
 	s.d.Logger.Log(r.Context(), level, "http request", attrs...)
 }
