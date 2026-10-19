@@ -228,7 +228,7 @@ go test -race ./...    # o mesmo, com detector de corridas
 go test -short ./...   # só os unitários (sem containers)
 ```
 
-**Dependências dos testes:** os testes de integração sobem os próprios containers com [testcontainers](https://golang.testcontainers.org/) (PostgreSQL 17 e MiniStack), independentes do Compose. Basta o Docker estar rodando e o usuário ter acesso a ele. Sem Docker, ou com `-short`, esses testes são ignorados (`SKIP`) e os unitários rodam normalmente. Não há build tags.
+**Dependências dos testes:** os testes de integração sobem os próprios containers com [testcontainers](https://golang.testcontainers.org/) (PostgreSQL 17, MiniStack e Keycloak com o realm do projeto), independentes do Compose. Basta o Docker estar rodando e o usuário ter acesso a ele. Sem Docker, ou com `-short`, esses testes são ignorados (`SKIP`) e os unitários rodam normalmente. Não há build tags.
 
 | Pacote | O que cobre |
 |---|---|
@@ -239,8 +239,9 @@ go test -short ./...   # só os unitários (sem containers)
 | `internal/adapters/httpapi` | contrato HTTP, permissões, códigos de erro, logs |
 | `internal/adapters/auth` | validação de tokens (IdP falso com RSA real) |
 | `internal/platform/fxapp` | composição Fx, início, encerramento e retomada entre instâncias |
+| `internal/e2e` | ponta a ponta com Keycloak, PostgreSQL e a aplicação HTTP reais: credenciais ausentes, inválidas, adulteradas e expiradas; isolamento entre provedores em consultas e replays; restrição das operações internas; nenhum efeito financeiro em acessos recusados |
 
-**Teste contra o Keycloak real** (com o Compose de pé):
+**Teste extra contra o Keycloak do Compose** (opcional, com o ambiente de pé):
 ```bash
 KEYCLOAK_URL=http://localhost:8080 go test -count=1 ./internal/adapters/auth/ -run Keycloak -v
 ```
@@ -279,6 +280,7 @@ internal/domain/          money, wallet, wager, ledger, event (sem dependências
 internal/app/             casos de uso e portas
 internal/adapters/        postgres, httpapi, auth, sqs
 internal/platform/        config, fxapp (composição Fx), metrics
+internal/e2e/             testes ponta a ponta de autenticação e autorização
 internal/testsupport/     PostgreSQL em container para os testes
 migrations/               schema (goose)
 deploy/                   realm do Keycloak e criação das filas

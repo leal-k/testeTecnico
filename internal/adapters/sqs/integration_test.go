@@ -52,7 +52,7 @@ func TestMain(m *testing.M) {
 
 	ms, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: testcontainers.ContainerRequest{
-			Image:        "ministackorg/ministack:latest",
+			Image:        "ministackorg/ministack:1.5.29",
 			ExposedPorts: []string{"4566/tcp"},
 			WaitingFor:   wait.ForListeningPort("4566/tcp").WithStartupTimeout(90 * time.Second),
 		},

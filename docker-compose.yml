@@ -42,7 +42,7 @@ services:
       retries: 10
 
   keycloak:
-    image: quay.io/keycloak/keycloak:latest
+    image: quay.io/keycloak/keycloak:26.8.1
     restart: unless-stopped
     # start-dev: modo de desenvolvimento (H2 embutido, HTTP). Suficiente para o desafio.
     # --import-realm importa os arquivos .json de /opt/keycloak/data/import ao iniciar.
@@ -62,7 +62,7 @@ services:
       - ./deploy/keycloak:/opt/keycloak/data/import:ro,z
 
   ministack:
-    image: ministackorg/ministack:latest
+    image: ministackorg/ministack:1.5.29
     restart: unless-stopped
     ports:
       - "4566:4566"

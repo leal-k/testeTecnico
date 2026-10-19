@@ -301,7 +301,8 @@ Outras regras: o corpo é decodificado de forma estrita (campos desconhecidos, m
 ## 15. Estratégia de testes
 
 - **Unitários:** `Money` (parsing, escala, limites, overflow, moedas), carteira (incluindo 5000 operações aleatórias conferindo as invariantes), máquina de estados, regras dos cinco tipos, hash, eventos, configuração, contrato HTTP, validação de tokens (com um IdP falso de chaves RSA reais), consumidor e publisher (com dublês do SQS).
-- **Integração com infraestrutura real** (containers via testcontainers): PostgreSQL com as migrations reais, MiniStack (SQS) e, opcionalmente, o Keycloak do Compose. Nada da infraestrutura é substituído por mocks nesses testes.
+- **Integração com infraestrutura real** (containers via testcontainers): PostgreSQL com as migrations reais, MiniStack (SQS) e Keycloak com o realm do projeto. Nada da infraestrutura é substituído por mocks nesses testes.
+- **Ponta a ponta** (`internal/e2e`): Keycloak, PostgreSQL e a aplicação montada pelo Fx atendendo HTTP de verdade, com tokens emitidos pelo Keycloak. O realm de teste é o do projeto com a validade do token reduzida a 4 s, para testar um token expirado de verdade.
 - **Concorrência:** os testes de integração usam **três instâncias independentes** (pool de conexões e caso de uso próprios, compartilhando só o banco); `scripts/demo-concurrency.sh` repete os cenários principais contra os **três processos** do Compose.
 - **Ao final dos cenários financeiros**, os testes conferem que o saldo armazenado é igual à soma dos lançamentos do ledger.
 
@@ -318,7 +319,9 @@ Correspondência com a lista do enunciado:
 | 7. reversão antes da referência | `TestIntegration_PendingReference_ResolvedOnceEvenWithConcurrentRetries`, `TestIntegration_SQS_ReversalBeforeReference`, testes de expiração no `processor_test.go` |
 | 8. reinício preserva idempotência e pendências | `fxapp_test.go: TestLifecycle_AnotherInstanceResumesPendingWork`; replay entre instâncias |
 | HTTP e SQS para a mesma operação | `TestIntegration_SQS_SameOperationFromHTTPAndSQS` |
-| autenticação real e isolamento | `auth/verifier_test.go: TestKeycloak_RealTokens`; `wallets_test.go: TestIntegration_TransactionQueries_IsolateProviders` |
+| credenciais ausentes, inválidas e expiradas com o IdP real | `e2e/auth_test.go: TestE2E_MissingInvalidTamperedAndExpiredCredentialsAreRejected` |
+| isolamento entre provedores em consultas e replays | `TestE2E_ProvidersAreIsolatedInQueriesAndReplays`; `wallets_test.go: TestIntegration_TransactionQueries_IsolateProviders` |
+| restrição das operações internas, sem efeito financeiro em acesso recusado | `TestE2E_InternalOperationsAreRestricted` |
 | composição Fx e encerramento | `fxapp_test.go` |
 
 ## 16. Limitações, interpretações e trabalho não concluído
