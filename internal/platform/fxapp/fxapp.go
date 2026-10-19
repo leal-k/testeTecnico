@@ -21,6 +21,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/fx"
 	"go.uber.org/fx/fxevent"
@@ -52,18 +53,24 @@ func Options(cfg config.Config) fx.Option {
 		AuthModule,
 		UseCasesModule,
 		// A ordem dos módulos define a ordem de encerramento (inversa):
-		// HTTP, depois SQS, depois o worker de pendências, por fim o banco.
+		// HTTP, consumidor SQS, publisher da outbox, worker de pendências e,
+		// por fim, o banco.
 		WorkersModule,
-		sqsModule(cfg),
+		messagingModules(cfg),
 		HTTPModule,
 	)
 }
 
-func sqsModule(cfg config.Config) fx.Option {
+func messagingModules(cfg config.Config) fx.Option {
 	if !cfg.SQSEnabled {
 		return fx.Options()
 	}
-	return SQSModule
+	opts := []fx.Option{AWSModule}
+	if cfg.OutboxEnabled {
+		opts = append(opts, OutboxModule) // antes do consumidor: para depois dele
+	}
+	opts = append(opts, SQSModule)
+	return fx.Options(opts...)
 }
 
 // NewLogger cria o logger JSON da aplicação.
@@ -194,7 +201,17 @@ var WorkersModule = fx.Module("workers",
 	}),
 )
 
-// ---- SQS --------------------------------------------------------------------
+// ---- mensageria -------------------------------------------------------------
+
+// AWSModule fornece o cliente SQS compartilhado pelo consumidor e pelo publisher.
+var AWSModule = fx.Module("aws",
+	fx.Provide(func(cfg config.Config) (sqsadapter.Client, error) {
+		return sqsadapter.NewClient(context.Background(), sqsadapter.ClientConfig{
+			Region:   cfg.AWSRegion,
+			Endpoint: cfg.SQSEndpointURL,
+		})
+	}),
+)
 
 var SQSModule = fx.Module("sqs",
 	fx.Provide(
@@ -208,14 +225,31 @@ var SQSModule = fx.Module("sqs",
 	}),
 )
 
-func NewSQSConsumer(cfg config.Config, log *slog.Logger, proc *app.Processor) (*sqsadapter.Consumer, error) {
-	client, err := sqsadapter.NewClient(context.Background(), sqsadapter.ClientConfig{
-		Region:   cfg.AWSRegion,
-		Endpoint: cfg.SQSEndpointURL,
-	})
-	if err != nil {
-		return nil, err
-	}
+var OutboxModule = fx.Module("outbox",
+	fx.Provide(
+		func(client sqsadapter.Client, cfg config.Config) *sqsadapter.Publisher {
+			return sqsadapter.NewPublisher(client, cfg.SQSEventsQueueName)
+		},
+		asHealthCheck(func(p *sqsadapter.Publisher) httpapi.HealthCheck {
+			return httpapi.HealthCheck{Name: "events-queue", Check: p.Ready}
+		}),
+	),
+	fx.Invoke(func(lc fx.Lifecycle, ws *Workers, log *slog.Logger, cfg config.Config, db *postgres.DB, pub *sqsadapter.Publisher) {
+		// Identidade única por processo: com ela o banco sabe de quem é cada reserva.
+		owner := cfg.InstanceID + "-" + uuid.NewString()[:8]
+		relay := app.NewOutboxRelay(db, pub, owner, app.OutboxConfig{
+			Interval:       cfg.OutboxInterval,
+			BatchSize:      cfg.OutboxBatchSize,
+			Lease:          cfg.OutboxLease,
+			PublishTimeout: cfg.OutboxPublishTimeout,
+			BackoffBase:    cfg.OutboxBackoffBase,
+			BackoffMax:     cfg.OutboxBackoffMax,
+		}, log)
+		StartWorker(lc, ws, log, "outbox-publisher", relay.Run)
+	}),
+)
+
+func NewSQSConsumer(cfg config.Config, log *slog.Logger, proc *app.Processor, client sqsadapter.Client) (*sqsadapter.Consumer, error) {
 	return sqsadapter.NewConsumer(client, proc, sqsadapter.Config{
 		ConsumerName:      cfg.SQSConsumerName,
 		QueueName:         cfg.SQSQueueName,

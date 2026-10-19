@@ -89,6 +89,8 @@ func TestLoad_InvalidValues(t *testing.T) {
 		"shutdown <= handle":   {"SHUTDOWN_TIMEOUT": "5s", "SQS_HANDLE_TIMEOUT": "10s"},
 		"too many messages":    {"SQS_MAX_MESSAGES": "11"},
 		"bad boolean":          {"SQS_ENABLED": "maybe"},
+		"lease <= publish":     {"OUTBOX_LEASE": "5s", "OUTBOX_PUBLISH_TIMEOUT": "5s"},
+		"zero outbox batch":    {"OUTBOX_BATCH_SIZE": "0"},
 	}
 	for name, overrides := range tests {
 		t.Run(name, func(t *testing.T) {

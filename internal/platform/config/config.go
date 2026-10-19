@@ -46,6 +46,16 @@ type Config struct {
 	SQSMaxReceives       int
 	SQSRetryBase         time.Duration
 	SQSRetryMax          time.Duration
+
+	// Publisher da outbox (só roda com SQS_ENABLED=true).
+	OutboxEnabled        bool
+	SQSEventsQueueName   string
+	OutboxInterval       time.Duration
+	OutboxBatchSize      int
+	OutboxLease          time.Duration
+	OutboxPublishTimeout time.Duration
+	OutboxBackoffBase    time.Duration
+	OutboxBackoffMax     time.Duration
 }
 
 // Load lê o ambiente. Toda variável tem um padrão de desenvolvimento, menos as
@@ -92,6 +102,15 @@ func load(getenv func(string) string) (Config, error) {
 		SQSMaxReceives:       r.integer("SQS_MAX_RECEIVES", 5),
 		SQSRetryBase:         r.duration("SQS_RETRY_BASE", 2*time.Second),
 		SQSRetryMax:          r.duration("SQS_RETRY_MAX", time.Minute),
+
+		OutboxEnabled:        r.boolean("OUTBOX_ENABLED", true),
+		SQSEventsQueueName:   r.str("SQS_EVENTS_QUEUE_NAME", "wager-events.fifo"),
+		OutboxInterval:       r.duration("OUTBOX_INTERVAL", 500*time.Millisecond),
+		OutboxBatchSize:      r.integer("OUTBOX_BATCH_SIZE", 50),
+		OutboxLease:          r.duration("OUTBOX_LEASE", 30*time.Second),
+		OutboxPublishTimeout: r.duration("OUTBOX_PUBLISH_TIMEOUT", 5*time.Second),
+		OutboxBackoffBase:    r.duration("OUTBOX_BACKOFF_BASE", time.Second),
+		OutboxBackoffMax:     r.duration("OUTBOX_BACKOFF_MAX", time.Minute),
 	}
 	if len(r.errs) > 0 {
 		return Config{}, errors.Join(r.errs...)
@@ -149,6 +168,17 @@ func (c Config) validate() error {
 			"SHUTDOWN_TIMEOUT must be larger than SQS_HANDLE_TIMEOUT")
 		check(c.SQSRetryBase > 0 && c.SQSRetryMax >= c.SQSRetryBase,
 			"SQS_RETRY_BASE must be positive and not larger than SQS_RETRY_MAX")
+
+		if c.OutboxEnabled {
+			check(c.OutboxInterval > 0, "OUTBOX_INTERVAL must be positive")
+			check(c.OutboxBatchSize > 0, "OUTBOX_BATCH_SIZE must be positive")
+			check(c.OutboxPublishTimeout > 0, "OUTBOX_PUBLISH_TIMEOUT must be positive")
+			// A reserva não pode vencer enquanto o evento ainda está sendo publicado.
+			check(c.OutboxLease > c.OutboxPublishTimeout, "OUTBOX_LEASE must be larger than OUTBOX_PUBLISH_TIMEOUT")
+			check(c.ShutdownTimeout > c.OutboxPublishTimeout, "SHUTDOWN_TIMEOUT must be larger than OUTBOX_PUBLISH_TIMEOUT")
+			check(c.OutboxBackoffBase > 0 && c.OutboxBackoffMax >= c.OutboxBackoffBase,
+				"OUTBOX_BACKOFF_BASE must be positive and not larger than OUTBOX_BACKOFF_MAX")
+		}
 	}
 	return errors.Join(errs...)
 }

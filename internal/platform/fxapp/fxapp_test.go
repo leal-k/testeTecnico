@@ -82,8 +82,10 @@ func TestGraphIsValid_WithTheSQSConsumer(t *testing.T) {
 	cfg.SQSEndpointURL = "http://127.0.0.1:1"
 	cfg.SQSQueueName = "wager-transactions.fifo"
 	cfg.SQSDLQName = "wager-transactions-dlq.fifo"
+	cfg.OutboxEnabled = true
+	cfg.SQSEventsQueueName = "wager-events.fifo"
 	if err := fx.ValidateApp(fxapp.Options(cfg)); err != nil {
-		t.Fatalf("invalid dependency graph with SQS: %v", err)
+		t.Fatalf("invalid dependency graph with SQS and the outbox publisher: %v", err)
 	}
 }
 
