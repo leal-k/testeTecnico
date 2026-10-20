@@ -12,7 +12,10 @@ import (
 	"github.com/leal-k/testeTecnico/internal/domain/event"
 )
 
-var _ app.OutboxStore = (*DB)(nil)
+var (
+	_ app.OutboxStore       = (*DB)(nil)
+	_ app.OutboxBatchMarker = (*DB)(nil)
+)
 
 const maxErrorLen = 500
 
@@ -89,6 +92,21 @@ func (d *DB) MarkOutboxPublished(ctx context.Context, id uuid.UUID) error {
 		WHERE id = $1 AND published_at IS NULL`, id)
 	if err != nil {
 		return fmt.Errorf("postgres: marking outbox event as published: %w", err)
+	}
+	return nil
+}
+
+// MarkOutboxPublishedBatch marca vários eventos numa só operação. Idempotente.
+func (d *DB) MarkOutboxPublishedBatch(ctx context.Context, ids []uuid.UUID) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	_, err := d.pool.Exec(ctx, `
+		UPDATE outbox_events
+		SET published_at = now(), locked_by = NULL, locked_until = NULL, last_error = NULL
+		WHERE id = ANY($1) AND published_at IS NULL`, ids)
+	if err != nil {
+		return fmt.Errorf("postgres: marking outbox events as published: %w", err)
 	}
 	return nil
 }

@@ -202,7 +202,9 @@ Os testes de integração tentam violar cada uma diretamente por SQL e conferem 
   - antes de cada publicação, confere se a reserva ainda cobre uma publicação inteira; senão, devolve o resto do lote;
   - **queda entre publicar e confirmar:** o evento é republicado quando a reserva vence, **com o mesmo `eventId`** (entrega pelo menos uma vez; testado);
   - **broker indisponível:** a falha é registrada (`attempts`, `last_error`) e o evento volta com backoff exponencial, sem limite de tentativas. Um evento confirmado no banco nunca é descartado;
-  - no encerramento, termina a publicação em andamento e devolve o resto do lote.
+  - no encerramento, termina a publicação em andamento e devolve o resto do lote;
+  - **publica em lotes de até 10** (`SendMessageBatch`, o limite do SQS) e marca os entregues com um único `UPDATE ... WHERE id = ANY($1)`. Cada evento do lote tem resultado próprio: os recusados voltam com backoff, os outros são confirmados. Encontrado pelo teste de carga ([docs/LOAD_TEST.md](docs/LOAD_TEST.md)): um evento por chamada limita a fila FIFO do SQS a 300 eventos/s, e lotes elevam o teto para 3.000;
+  - a reserva usa o índice parcial `(created_at, id) WHERE published_at IS NULL` (migration `00006`), na mesma ordem da consulta: lê só o começo do índice, em vez de ordenar todos os pendentes (54 ms → 0,34 ms com ~250 mil pendentes).
 - **Destino:** `wager-events.fifo`.
 - **Roteamento:** `MessageGroupId` = `aggregateId` (eventos do mesmo agregado saem em ordem entre si); `MessageDeduplicationId` = `eventId` (republicações em até 5 minutos são descartadas pelo próprio SQS); atributos `eventType` e `aggregateType` para filtrar sem abrir o corpo.
 - **Envelope:**
@@ -334,6 +336,8 @@ Correspondência com a lista do enunciado:
 - **`/metrics` é público**, como os health checks (expõe só contagens e tempos). Em produção, ficaria numa porta interna.
 - **Abertura de carteira não é idempotente por chave:** uma segunda abertura para o mesmo jogador e moeda é recusada (409), que já evita duplicidade, mas o cliente não recebe a carteira original como replay.
 - **Testes de integração "com três instâncias"** usam três pools e três casos de uso no mesmo processo de teste (o que prova que nada depende de memória); a demonstração com três processos de verdade é o `scripts/demo-concurrency.sh`.
+- **Retenção da outbox:** eventos publicados ficam na tabela (com `published_at`), sem limpeza. O índice da reserva só contém os pendentes, então isso não afeta a publicação, mas a tabela cresce sem limite. Em produção, um job apagaria (ou particionaria por data e descartaria partições) os publicados há mais de N dias.
+- **Vazão da outbox no ambiente local:** o MiniStack publica ~130 mensagens/s (processo Python em um núcleo), abaixo do que a API gera sob carga. O atraso da outbox medido localmente reflete o simulador; a análise está em [docs/LOAD_TEST.md](docs/LOAD_TEST.md).
 - **Redrive para a DLQ:** o consumidor move as mensagens explicitamente; o redrive configurado na fila não é exercitado por teste automatizado.
 
 **Interpretações adotadas**
@@ -343,7 +347,6 @@ Correspondência com a lista do enunciado:
 - `WIN` e `LOSS` aceitam referência opcional a uma `BET`, validada quando informada.
 - O serviço interno não envia operações de aposta; só provedores.
 
-**Não implementado (opcionais do enunciado)**
-- Ledger de partidas dobradas.
-- Tracing com OpenTelemetry e dashboards.
-- Testes de carga com medição de throughput e percentis.
+**Opcionais do enunciado**
+- **Teste de carga:** implementado (`cmd/loadtest`, `make loadtest`, `make loadtest-hot`); metodologia, resultados e análise em [docs/LOAD_TEST.md](docs/LOAD_TEST.md).
+- **Não implementados:** ledger de partidas dobradas; tracing com OpenTelemetry e dashboards.

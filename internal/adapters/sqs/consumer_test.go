@@ -443,3 +443,30 @@ func TestBackoff(t *testing.T) {
 		}
 	}
 }
+
+// fakeBatchClient acrescenta SendMessageBatch ao fakeClient. failIDs recusa
+// as entradas com esses índices; batchErr faz a chamada inteira falhar.
+type fakeBatchClient struct {
+	*fakeClient
+	batchCalls [][]types.SendMessageBatchRequestEntry
+	failIDs    map[string]bool
+	batchErr   error
+}
+
+func (f *fakeBatchClient) SendMessageBatch(_ context.Context, in *awssqs.SendMessageBatchInput, _ ...func(*awssqs.Options)) (*awssqs.SendMessageBatchOutput, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.batchErr != nil {
+		return nil, f.batchErr
+	}
+	f.batchCalls = append(f.batchCalls, in.Entries)
+	out := &awssqs.SendMessageBatchOutput{}
+	for _, e := range in.Entries {
+		if f.failIDs[aws.ToString(e.Id)] {
+			out.Failed = append(out.Failed, types.BatchResultErrorEntry{Id: e.Id, Code: aws.String("InternalError"), Message: aws.String("boom")})
+			continue
+		}
+		out.Successful = append(out.Successful, types.SendMessageBatchResultEntry{Id: e.Id})
+	}
+	return out, nil
+}

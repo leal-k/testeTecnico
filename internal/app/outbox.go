@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"math/rand/v2"
 	"time"
@@ -36,11 +37,28 @@ type EventPublisher interface {
 	Publish(ctx context.Context, e event.Event) error
 }
 
+// MaxPublishBatch é o maior lote enviado de uma vez (limite do SQS).
+const MaxPublishBatch = 10
+
+// BatchPublisher é opcional: um publisher que entrega vários eventos numa só
+// chamada. Devolve um erro por evento, na mesma ordem (nil = entregue), porque
+// o lote pode falhar em parte. O relay usa este caminho quando disponível.
+type BatchPublisher interface {
+	EventPublisher
+	PublishBatch(ctx context.Context, events []event.Event) []error
+}
+
+// OutboxBatchMarker é opcional: marca vários eventos como publicados numa só
+// operação. Sem ele, o relay marca um por um.
+type OutboxBatchMarker interface {
+	MarkOutboxPublishedBatch(ctx context.Context, ids []uuid.UUID) error
+}
+
 type OutboxConfig struct {
 	Interval       time.Duration // espera entre rodadas sem trabalho
 	BatchSize      int
 	Lease          time.Duration // validade da reserva
-	PublishTimeout time.Duration // limite para publicar UM evento
+	PublishTimeout time.Duration // limite para publicar UM evento ou UM lote de até MaxPublishBatch
 	BackoffBase    time.Duration
 	BackoffMax     time.Duration
 }
@@ -65,7 +83,10 @@ func DefaultOutboxConfig() OutboxConfig {
 //   - várias instâncias dividem o trabalho sem publicar o mesmo evento ao
 //     mesmo tempo (reserva com SKIP LOCKED + lease);
 //   - falha de publicação não perde o evento: ele volta com backoff, sem limite
-//     de tentativas.
+//     de tentativas;
+//   - com um BatchPublisher, publica em lotes de até MaxPublishBatch: uma ida
+//     ao broker e uma ao banco por lote, em vez de duas por evento. Cada evento
+//     do lote tem resultado próprio (falha parcial não afeta os outros).
 type OutboxRelay struct {
 	store       OutboxStore
 	publisher   EventPublisher
@@ -132,6 +153,16 @@ func (r *OutboxRelay) RunOnce(ctx context.Context) int {
 	// Margem: só começa a publicar um evento se a reserva ainda cobrir uma
 	// publicação inteira; senão devolve o resto do lote.
 	deadline := claimedAt.Add(r.cfg.Lease - r.cfg.PublishTimeout)
+	if bp, ok := r.publisher.(BatchPublisher); ok {
+		for start := 0; start < len(records); start += MaxPublishBatch {
+			if ctx.Err() != nil || time.Now().After(deadline) {
+				r.release(records[start:])
+				break
+			}
+			r.publishBatch(bp, records[start:min(start+MaxPublishBatch, len(records))])
+		}
+		return len(records)
+	}
 	for i, rec := range records {
 		if ctx.Err() != nil || time.Now().After(deadline) {
 			r.release(records[i:])
@@ -140,6 +171,74 @@ func (r *OutboxRelay) RunOnce(ctx context.Context) int {
 		r.publish(rec)
 	}
 	return len(records)
+}
+
+// publishBatch publica um lote numa só chamada e marca os entregues numa só
+// operação. Como em publish, usa um contexto próprio.
+func (r *OutboxRelay) publishBatch(bp BatchPublisher, recs []OutboxRecord) {
+	ctx, cancel := context.WithTimeout(context.Background(), r.cfg.PublishTimeout)
+	defer cancel()
+
+	events := make([]event.Event, len(recs))
+	for i, rec := range recs {
+		events[i] = rec.Event
+	}
+	errs := bp.PublishBatch(ctx, events)
+
+	var delivered []OutboxRecord
+	for i, rec := range recs {
+		var err error
+		if i < len(errs) {
+			err = errs[i]
+		} else {
+			err = errors.New("publisher returned no result for this event")
+		}
+		if err != nil {
+			r.failed(ctx, rec, err)
+			continue
+		}
+		delivered = append(delivered, rec)
+	}
+	if len(delivered) == 0 {
+		return
+	}
+
+	ids := make([]uuid.UUID, len(delivered))
+	for i, rec := range delivered {
+		ids[i] = rec.Event.ID
+	}
+	if marker, ok := r.store.(OutboxBatchMarker); ok {
+		if err := marker.MarkOutboxPublishedBatch(ctx, ids); err != nil {
+			r.log.Warn("marking events as published failed, they may be republished",
+				"error", err.Error(), "count", len(ids))
+		}
+	} else {
+		for _, id := range ids {
+			if err := r.store.MarkOutboxPublished(ctx, id); err != nil {
+				r.log.Warn("marking event as published failed, it may be republished",
+					"error", err.Error(), "eventId", id.String())
+			}
+		}
+	}
+	for _, rec := range delivered {
+		r.onPublished(rec.Event, rec.Attempts+1)
+	}
+	r.log.Debug("event batch published", "count", len(delivered))
+}
+
+// failed registra a falha de publicação e agenda a próxima tentativa.
+func (r *OutboxRelay) failed(ctx context.Context, rec OutboxRecord, err error) {
+	e := rec.Event
+	retryIn := r.backoff(rec.Attempts + 1)
+	r.onFailed(e, err)
+	log := r.log.With("eventId", e.ID.String(), "eventType", string(e.Type),
+		"aggregateId", e.AggregateID.String(), "correlationId", e.CorrelationID)
+	log.Warn("publishing event failed, will retry", "error", err.Error(),
+		"attempt", rec.Attempts+1, "retryIn", retryIn.String())
+	if mErr := r.store.MarkOutboxFailed(ctx, e.ID, r.owner, retryIn, err.Error()); mErr != nil {
+		// O lease vence e o evento volta de qualquer forma.
+		log.Warn("recording the publish failure failed", "error", mErr.Error())
+	}
 }
 
 // publish usa um contexto próprio: um evento em andamento termina mesmo
@@ -152,14 +251,7 @@ func (r *OutboxRelay) publish(rec OutboxRecord) {
 		"aggregateId", e.AggregateID.String(), "correlationId", e.CorrelationID)
 
 	if err := r.publisher.Publish(ctx, e); err != nil {
-		retryIn := r.backoff(rec.Attempts + 1)
-		r.onFailed(e, err)
-		log.Warn("publishing event failed, will retry", "error", err.Error(),
-			"attempt", rec.Attempts+1, "retryIn", retryIn.String())
-		if mErr := r.store.MarkOutboxFailed(ctx, e.ID, r.owner, retryIn, err.Error()); mErr != nil {
-			// O lease vence e o evento volta de qualquer forma.
-			log.Warn("recording the publish failure failed", "error", mErr.Error())
-		}
+		r.failed(ctx, rec, err)
 		return
 	}
 	if err := r.store.MarkOutboxPublished(ctx, e.ID); err != nil {

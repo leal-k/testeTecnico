@@ -194,3 +194,109 @@ func TestOutboxRelay_RunStopsOnCancel(t *testing.T) {
 		t.Fatal("Run did not stop")
 	}
 }
+
+// ---- publicação em lote -----------------------------------------------------
+
+// fakeBatchPublisher publica em lote reaproveitando as regras do fakePublisher
+// (failOn, hook), e registra o tamanho de cada chamada.
+type fakeBatchPublisher struct {
+	fakePublisher
+	calls []int
+}
+
+func (p *fakeBatchPublisher) PublishBatch(ctx context.Context, events []event.Event) []error {
+	p.mu.Lock()
+	p.calls = append(p.calls, len(events))
+	p.mu.Unlock()
+	errs := make([]error, len(events))
+	for i, e := range events {
+		errs[i] = p.Publish(ctx, e)
+	}
+	return errs
+}
+
+// fakeBatchStore também marca em lote, e registra cada chamada.
+type fakeBatchStore struct {
+	*fakeOutboxStore
+	markCalls int
+}
+
+func (s *fakeBatchStore) MarkOutboxPublishedBatch(_ context.Context, ids []uuid.UUID) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.markCalls++
+	if s.markErr != nil {
+		return s.markErr
+	}
+	s.published = append(s.published, ids...)
+	return nil
+}
+
+func TestOutboxRelay_Batch_SplitsIntoBrokerSizedCallsAndMarksOncePerCall(t *testing.T) {
+	store := &fakeBatchStore{fakeOutboxStore: &fakeOutboxStore{pending: records(25)}}
+	pub := &fakeBatchPublisher{}
+	cfg := relayConfig()
+	cfg.BatchSize = 25
+	NewOutboxRelay(store, pub, "owner-1", cfg, nil).RunOnce(context.Background())
+
+	if len(pub.calls) != 3 || pub.calls[0] != 10 || pub.calls[1] != 10 || pub.calls[2] != 5 {
+		t.Errorf("publish calls = %v, want [10 10 5]", pub.calls)
+	}
+	if store.markCalls != 3 || len(store.published) != 25 {
+		t.Errorf("mark calls = %d, published = %d", store.markCalls, len(store.published))
+	}
+	for i := range pub.sent {
+		if pub.sent[i].ID != store.published[i] {
+			t.Fatalf("event %d: order or id mismatch", i)
+		}
+	}
+}
+
+func TestOutboxRelay_Batch_PartialFailureOnlyRetriesTheFailedEvents(t *testing.T) {
+	recs := records(4)
+	recs[2].Attempts = 2
+	store := &fakeOutboxStore{pending: recs} // sem marcação em lote: marca um por um
+	pub := &fakeBatchPublisher{fakePublisher: fakePublisher{failOn: map[uuid.UUID]bool{recs[2].Event.ID: true}}}
+	NewOutboxRelay(store, pub, "owner-1", relayConfig(), nil).RunOnce(context.Background())
+
+	if len(pub.calls) != 1 {
+		t.Errorf("publish calls = %v, want one batch", pub.calls)
+	}
+	if len(store.published) != 3 {
+		t.Errorf("published = %d, want the 3 delivered", len(store.published))
+	}
+	for _, id := range store.published {
+		if id == recs[2].Event.ID {
+			t.Errorf("the failed event was marked as published")
+		}
+	}
+	if len(store.failed) != 1 || store.failed[recs[2].Event.ID] != 4*time.Second {
+		t.Errorf("failed = %v, want only the 3rd event with backoff 4s", store.failed)
+	}
+}
+
+func TestOutboxRelay_Batch_MarkFailureDoesNotLoseEvents(t *testing.T) {
+	store := &fakeBatchStore{fakeOutboxStore: &fakeOutboxStore{pending: records(3), markErr: errors.New("db down")}}
+	pub := &fakeBatchPublisher{}
+	NewOutboxRelay(store, pub, "owner-1", relayConfig(), nil).RunOnce(context.Background())
+
+	if len(pub.sent) != 3 || len(store.failed) != 0 {
+		t.Errorf("sent=%d failed=%d: a mark failure must not be treated as a publish failure", len(pub.sent), len(store.failed))
+	}
+}
+
+func TestOutboxRelay_Batch_ShutdownReleasesTheBatchesNotStarted(t *testing.T) {
+	store := &fakeOutboxStore{pending: records(25)}
+	ctx, cancel := context.WithCancel(context.Background())
+	pub := &fakeBatchPublisher{fakePublisher: fakePublisher{hook: cancel}} // encerramento durante o 1º lote
+	cfg := relayConfig()
+	cfg.BatchSize = 25
+	NewOutboxRelay(store, pub, "owner-1", cfg, nil).RunOnce(ctx)
+
+	if len(store.published) != 10 {
+		t.Errorf("published = %d, want the 10 of the batch in progress", len(store.published))
+	}
+	if len(store.released) != 15 {
+		t.Errorf("released = %d, want the 15 not started", len(store.released))
+	}
+}

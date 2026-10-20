@@ -3,10 +3,12 @@ package sqs
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
 	"github.com/google/uuid"
 
 	"github.com/leal-k/testeTecnico/internal/domain/event"
@@ -73,5 +75,86 @@ func TestPublisher_CausationIsOptional(t *testing.T) {
 	_ = json.Unmarshal(raw, &m)
 	if _, present := m["causationId"]; present {
 		t.Errorf("causationId must be omitted when empty")
+	}
+}
+
+func batchEvents(n int) []event.Event {
+	out := make([]event.Event, n)
+	for i := range out {
+		out[i] = event.Event{ID: uuid.New(), Type: event.TypeWagerTransactionProcessed, AggregateType: event.AggregateWagerTransaction,
+			AggregateID: uuid.New(), Payload: []byte(`{}`)}
+	}
+	return out
+}
+
+func TestPublisher_Batch_UsesBrokerSizedCallsWithTheSameRouting(t *testing.T) {
+	client := &fakeBatchClient{fakeClient: newFakeClient()}
+	p := NewPublisher(client, "wager-events.fifo")
+	events := batchEvents(12)
+
+	errs := p.PublishBatch(context.Background(), events)
+
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("event %d: %v", i, err)
+		}
+	}
+	if len(client.batchCalls) != 2 || len(client.batchCalls[0]) != 10 || len(client.batchCalls[1]) != 2 {
+		t.Fatalf("batch calls = %d", len(client.batchCalls))
+	}
+	if len(client.sent) != 0 {
+		t.Errorf("single sends = %d, want 0", len(client.sent))
+	}
+	var all []types.SendMessageBatchRequestEntry
+	for _, c := range client.batchCalls {
+		all = append(all, c...)
+	}
+	for i, en := range all {
+		e := events[i] // a ordem do lote é a ordem recebida
+		if aws.ToString(en.MessageGroupId) != e.AggregateID.String() ||
+			aws.ToString(en.MessageDeduplicationId) != e.ID.String() ||
+			aws.ToString(en.MessageAttributes["eventType"].StringValue) != string(e.Type) {
+			t.Errorf("entry %d routing = %+v", i, en)
+		}
+		var env EventEnvelope
+		if err := json.Unmarshal([]byte(aws.ToString(en.MessageBody)), &env); err != nil || env.EventID != e.ID.String() {
+			t.Errorf("entry %d body = %s", i, aws.ToString(en.MessageBody))
+		}
+	}
+}
+
+func TestPublisher_Batch_ReportsEachEntryOnItsOwn(t *testing.T) {
+	client := &fakeBatchClient{fakeClient: newFakeClient(), failIDs: map[string]bool{"1": true, "11": true}}
+	p := NewPublisher(client, "wager-events.fifo")
+
+	errs := p.PublishBatch(context.Background(), batchEvents(12))
+
+	for i, err := range errs {
+		if failed := i == 1 || i == 11; failed != (err != nil) {
+			t.Errorf("event %d: err = %v", i, err)
+		}
+	}
+}
+
+func TestPublisher_Batch_WholeCallFailureFailsEveryEntryOfThatCall(t *testing.T) {
+	client := &fakeBatchClient{fakeClient: newFakeClient(), batchErr: errors.New("connection refused")}
+	errs := NewPublisher(client, "wager-events.fifo").PublishBatch(context.Background(), batchEvents(3))
+	for i, err := range errs {
+		if err == nil {
+			t.Errorf("event %d reported as delivered", i)
+		}
+	}
+}
+
+func TestPublisher_Batch_FallsBackToSingleSends(t *testing.T) {
+	client := newFakeClient() // sem SendMessageBatch
+	errs := NewPublisher(client, "wager-events.fifo").PublishBatch(context.Background(), batchEvents(3))
+	for _, err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(client.sent) != 3 {
+		t.Errorf("single sends = %d, want 3", len(client.sent))
 	}
 }

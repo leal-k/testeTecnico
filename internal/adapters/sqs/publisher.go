@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"sync"
 	"time"
 
@@ -15,7 +16,14 @@ import (
 	"github.com/leal-k/testeTecnico/internal/domain/event"
 )
 
-var _ app.EventPublisher = (*Publisher)(nil)
+var _ app.BatchPublisher = (*Publisher)(nil)
+
+// batchSender é implementado pelo cliente real do SQS. Fica fora da interface
+// Client para não obrigar os dublês do consumidor a implementá-lo; sem ele, o
+// Publisher envia um por um.
+type batchSender interface {
+	SendMessageBatch(ctx context.Context, in *awssqs.SendMessageBatchInput, opts ...func(*awssqs.Options)) (*awssqs.SendMessageBatchOutput, error)
+}
 
 // EventEnvelope é o formato publicado em wager-events.fifo.
 type EventEnvelope struct {
@@ -67,29 +75,122 @@ func NewPublisher(client Client, queueName string) *Publisher {
 	return &Publisher{client: client, queueName: queueName}
 }
 
+// outgoingMessage monta corpo, roteamento e atributos de um evento.
+type outgoingMessage struct {
+	body, group, dedup string
+	attrs              map[string]types.MessageAttributeValue
+}
+
+func newOutgoingMessage(e event.Event) (outgoingMessage, error) {
+	body, err := json.Marshal(Envelope(e))
+	if err != nil {
+		return outgoingMessage{}, fmt.Errorf("encoding event %s: %w", e.ID, err)
+	}
+	return outgoingMessage{
+		body:  string(body),
+		group: e.AggregateID.String(),
+		dedup: e.ID.String(),
+		attrs: map[string]types.MessageAttributeValue{
+			"eventType":     {DataType: aws.String("String"), StringValue: aws.String(string(e.Type))},
+			"aggregateType": {DataType: aws.String("String"), StringValue: aws.String(e.AggregateType)},
+		},
+	}, nil
+}
+
 func (p *Publisher) Publish(ctx context.Context, e event.Event) error {
 	url, err := p.url(ctx)
 	if err != nil {
 		return err
 	}
-	body, err := json.Marshal(Envelope(e))
+	m, err := newOutgoingMessage(e)
 	if err != nil {
-		return fmt.Errorf("encoding event %s: %w", e.ID, err)
+		return err
 	}
 	_, err = p.client.SendMessage(ctx, &awssqs.SendMessageInput{
 		QueueUrl:               aws.String(url),
-		MessageBody:            aws.String(string(body)),
-		MessageGroupId:         aws.String(e.AggregateID.String()),
-		MessageDeduplicationId: aws.String(e.ID.String()),
-		MessageAttributes: map[string]types.MessageAttributeValue{
-			"eventType":     {DataType: aws.String("String"), StringValue: aws.String(string(e.Type))},
-			"aggregateType": {DataType: aws.String("String"), StringValue: aws.String(e.AggregateType)},
-		},
+		MessageBody:            aws.String(m.body),
+		MessageGroupId:         aws.String(m.group),
+		MessageDeduplicationId: aws.String(m.dedup),
+		MessageAttributes:      m.attrs,
 	})
 	if err != nil {
 		return fmt.Errorf("sending event %s: %w", e.ID, err)
 	}
 	return nil
+}
+
+// PublishBatch envia até app.MaxPublishBatch eventos por chamada
+// (SendMessageBatch). Devolve um erro por evento, na ordem recebida: o SQS
+// responde entrada por entrada, e uma entrada recusada não afeta as outras.
+// Numa fila FIFO, as mensagens do mesmo grupo dentro de um lote entram na
+// ordem em que aparecem no lote.
+func (p *Publisher) PublishBatch(ctx context.Context, events []event.Event) []error {
+	errs := make([]error, len(events))
+	bs, ok := p.client.(batchSender)
+	if !ok {
+		for i, e := range events {
+			errs[i] = p.Publish(ctx, e)
+		}
+		return errs
+	}
+	url, err := p.url(ctx)
+	if err != nil {
+		for i := range errs {
+			errs[i] = err
+		}
+		return errs
+	}
+
+	for start := 0; start < len(events); start += app.MaxPublishBatch {
+		end := min(start+app.MaxPublishBatch, len(events))
+		var entries []types.SendMessageBatchRequestEntry
+		for i := start; i < end; i++ {
+			m, err := newOutgoingMessage(events[i])
+			if err != nil {
+				errs[i] = err
+				continue
+			}
+			entries = append(entries, types.SendMessageBatchRequestEntry{
+				Id:                     aws.String(strconv.Itoa(i)), // índice no lote: liga a resposta ao evento
+				MessageBody:            aws.String(m.body),
+				MessageGroupId:         aws.String(m.group),
+				MessageDeduplicationId: aws.String(m.dedup),
+				MessageAttributes:      m.attrs,
+			})
+		}
+		if len(entries) == 0 {
+			continue
+		}
+		out, err := bs.SendMessageBatch(ctx, &awssqs.SendMessageBatchInput{QueueUrl: aws.String(url), Entries: entries})
+		if err != nil {
+			for _, en := range entries {
+				i, _ := strconv.Atoi(aws.ToString(en.Id))
+				errs[i] = fmt.Errorf("sending event %s: %w", events[i].ID, err)
+			}
+			continue
+		}
+		delivered := map[string]bool{}
+		for _, ok := range out.Successful {
+			delivered[aws.ToString(ok.Id)] = true
+		}
+		reasons := map[string]string{}
+		for _, f := range out.Failed {
+			reasons[aws.ToString(f.Id)] = aws.ToString(f.Code) + ": " + aws.ToString(f.Message)
+		}
+		for _, en := range entries {
+			id := aws.ToString(en.Id)
+			if delivered[id] {
+				continue
+			}
+			i, _ := strconv.Atoi(id)
+			reason, found := reasons[id]
+			if !found {
+				reason = "not acknowledged by the broker"
+			}
+			errs[i] = fmt.Errorf("sending event %s: %s", events[i].ID, reason)
+		}
+	}
+	return errs
 }
 
 // Ready confere que a fila de eventos existe e responde (sem cache).

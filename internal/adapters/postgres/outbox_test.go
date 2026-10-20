@@ -167,6 +167,43 @@ func TestOutbox_PublishedAndFailedEvents(t *testing.T) {
 	}
 }
 
+func TestOutbox_MarkPublishedBatch(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	db := e.dbs[0]
+	e.clearOutbox(t)
+	total := e.makeEvents(t, 3) // 6 eventos
+
+	recs, err := db.ClaimOutbox(ctx, "owner", time.Minute, 10)
+	if err != nil || len(recs) != total {
+		t.Fatalf("claim = %d, %v", len(recs), err)
+	}
+	batch := []uuid.UUID{recs[0].Event.ID, recs[1].Event.ID, recs[2].Event.ID, recs[3].Event.ID}
+	if err := db.MarkOutboxPublishedBatch(ctx, batch); err != nil {
+		t.Fatal(err)
+	}
+	if n := e.count(t, `SELECT count(*) FROM outbox_events WHERE id = ANY($1) AND published_at IS NOT NULL AND locked_by IS NULL`, batch); n != 4 {
+		t.Errorf("published = %d, want 4", n)
+	}
+	if n := e.count(t, `SELECT count(*) FROM outbox_events WHERE published_at IS NULL`); n != total-4 {
+		t.Errorf("pending = %d, want %d (only the batch is marked)", n, total-4)
+	}
+	// Repetir é inofensivo e não muda published_at.
+	var first time.Time
+	_ = e.pool.QueryRow(ctx, `SELECT published_at FROM outbox_events WHERE id = $1`, batch[0]).Scan(&first)
+	if err := db.MarkOutboxPublishedBatch(ctx, batch); err != nil {
+		t.Errorf("idempotent mark: %v", err)
+	}
+	var again time.Time
+	_ = e.pool.QueryRow(ctx, `SELECT published_at FROM outbox_events WHERE id = $1`, batch[0]).Scan(&again)
+	if !first.Equal(again) {
+		t.Errorf("published_at changed on the repeated mark")
+	}
+	if err := db.MarkOutboxPublishedBatch(ctx, nil); err != nil {
+		t.Errorf("empty batch: %v", err)
+	}
+}
+
 func TestOutbox_ReleaseAndLag(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
