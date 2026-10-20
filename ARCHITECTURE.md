@@ -60,6 +60,13 @@ O domínio não conhece Fx, HTTP, SQS nem a biblioteca do banco. Os casos de uso
 - Criação (`wallet.Open`) e reidratação (`wallet.Rehydrate`) são separadas: reidratar valida, mas não reaplica movimentos nem gera efeitos.
 - `Debit` e `Credit` validam tudo antes de alterar o estado; numa falha, a carteira fica intacta. Devolvem um `Movement` (direção, valor, saldo anterior e posterior), que o caso de uso transforma em lançamento do ledger.
 - A versão começa em 1 e sobe exatamente +1 a cada mudança de saldo. `LOSS` não altera a versão.
+- **Abertura** (`POST /wallets`, só serviço interno): numa única transação SQL, grava a carteira (versão 1) e, se o saldo inicial for positivo, a transação `OPENING` já `PROCESSED`, o lançamento de crédito e os eventos `WagerTransactionProcessed` e `WalletBalanceChanged` na outbox. Com saldo inicial **zero**, grava só a carteira: sem `OPENING`, sem lançamento e sem esses eventos. Uma segunda abertura para o mesmo jogador e moeda responde `409 WALLET_ALREADY_EXISTS` (garantido pelo `UNIQUE (player_id, currency)`).
+- **Ledger só quando o saldo muda:** um lançamento é gravado apenas quando há movimento. `LOSS`, rejeições e pendências não geram lançamento nem mudam a versão da carteira.
+
+### Erros, pânico e contexto
+- Erros de domínio são valores sentinela (`ErrInsufficientFunds`, `ErrCurrencyMismatch`, `ErrOverflow`...), comparáveis com `errors.Is`. Rejeições de negócio são do tipo `wager.Rejection` (com o `failureCode`), lido com `errors.As`; o adaptador HTTP traduz cada erro para o código e o corpo da seção 12.
+- Nenhuma regra de negócio usa `panic`. O único `recover` fica no servidor HTTP, como rede de segurança: um pânico inesperado vira `500` e é registrado, sem derrubar o processo.
+- Toda operação de I/O recebe `context.Context` e respeita cancelamento e prazo: 15 s por requisição HTTP, 15 s por mensagem SQS e 5 s por publicação da outbox; no encerramento, os contextos dos workers são cancelados (seção 13).
 
 ### Transação de aposta: máquina de estados
 
@@ -274,6 +281,8 @@ Erros têm sempre o corpo `{"error": {"code": "...", "message": "..."}}`, com c�
 | Erro inesperado | 500 | `INTERNAL_ERROR` (detalhes só no log) |
 
 **Interpretação:** 422 para rejeição de negócio porque a requisição é válida, mas não pode ser aplicada. Assim, as cinco situações pedidas (entrada inválida, conflito, rejeição de negócio, pendente e indisponibilidade) são distinguíveis só pelo código HTTP.
+
+**Paginação do ledger:** ordem pelo `seq` do lançamento (coluna `IDENTITY`, crescente e nunca reutilizada), então a ordem é estável mesmo com lançamentos novos chegando durante a leitura. O cursor é opaco (base64 de carteira + último `seq`); um cursor adulterado ou de outra carteira responde `400 INVALID_CURSOR`. `limit` padrão 50, máximo 200.
 
 Outras regras: o corpo é decodificado de forma estrita (campos desconhecidos, mais de um objeto e corpo acima de 1 MiB são recusados); cada requisição tem prazo de 15 s; um pânico vira 500 sem derrubar o processo.
 
