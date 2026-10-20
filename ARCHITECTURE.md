@@ -297,6 +297,7 @@ Outras regras: o corpo é decodificado de forma estrita (campos desconhecidos, m
 | divergências de reconciliação | `reconciliation_divergences_total` |
 
   As métricas são coletadas por decoradores em volta dos casos de uso e por ganchos dos workers; o domínio não conhece o Prometheus. Rótulos têm poucos valores possíveis (nunca IDs).
+- **Dashboards:** o Compose sobe Prometheus (descobre as réplicas pelo DNS do serviço `app`, então funciona com qualquer número de instâncias) e Grafana com datasource e dashboard provisionados por arquivo (`deploy/grafana/`). O dashboard cobre vazão, latência p50/p95/p99, erros, duplicatas, conflitos, desfechos SQS (incluindo DLQ), publicação e atraso da outbox, referências pendentes, divergências e saúde de cada instância. As métricas globais medidas no banco (`outbox_lag_seconds`, `outbox_pending_events`) são reportadas por todas as instâncias com o mesmo valor, por isso o dashboard usa `max`, não `sum`.
 - **Health:** `/health/live` (processo) e `/health/ready` (PostgreSQL, fila de entrada, DLQ e fila de eventos; 503 se qualquer uma falhar).
 - **Reconciliação:** reconstrói o saldo pelo ledger (incluindo a abertura) e compara com o armazenado em **uma única consulta SQL**, que enxerga um único snapshot dos dados. Divergências aparecem na resposta, no log (`level: ERROR`) e na métrica. O saldo nunca é alterado.
 
@@ -349,4 +350,18 @@ Correspondência com a lista do enunciado:
 
 **Opcionais do enunciado**
 - **Teste de carga:** implementado (`cmd/loadtest`, `make loadtest`, `make loadtest-hot`); metodologia, resultados e análise em [docs/LOAD_TEST.md](docs/LOAD_TEST.md).
-- **Não implementados:** ledger de partidas dobradas; tracing com OpenTelemetry e dashboards.
+- **Dashboards:** implementados (Prometheus + Grafana no Compose, seção 14).
+- **Não implementados:** tracing com OpenTelemetry; ledger de partidas dobradas (como seria, abaixo).
+
+**Ledger de partidas dobradas: como seria e por que ficou de fora**
+
+Hoje o ledger é de partida simples: cada transação gera um lançamento na carteira, com `balance_before`, `balance_after` e um `CHECK` aritmético; a reconciliação confere o saldo contra a soma dos lançamentos. Isso garante a invariante pedida (o saldo de cada carteira é explicado pelo ledger), mas não diz **de onde veio e para onde foi** o dinheiro.
+
+Em partidas dobradas, toda movimentação vira um lançamento contábil com duas ou mais pernas que somam zero:
+- **Contas:** uma por carteira de jogador e moeda, mais contas da casa por moeda (por exemplo `house:BRL` para apostas e prêmios e `funding:BRL` para aberturas).
+- **Tabelas:** `journal_entries` (um lançamento por transação de aposta) e `postings` (`entry_id`, `account_id`, `amount` com sinal). Uma constraint trigger `DEFERRABLE INITIALLY DEFERRED` exige, no commit, que a soma das pernas de cada lançamento seja zero.
+- **Mapeamento:** `BET` 25 → jogador −25, casa +25. `WIN` 40 → casa −40, jogador +40. `LOSS` → nenhuma perna, ou lançamento de valor zero. `REFUND`/`ROLLBACK` → as pernas invertidas da transação de referência. Abertura → `funding` −X, jogador +X.
+- **Ganho:** invariante global (a soma de todas as contas é sempre zero), resultado da casa por moeda e trilha completa de contrapartida para auditoria.
+- **Cuidado principal:** a conta da casa é tocada por toda transação. Se ela tivesse saldo armazenado com `SELECT ... FOR UPDATE`, viraria um ponto único de serialização (todas as carteiras disputariam o mesmo lock). O caminho seria não guardar saldo na conta da casa (derivado das pernas, só leitura) ou dividi-la em subcontas por partição.
+
+Ficou de fora porque muda o núcleo do schema e das transações SQL já verificados (invariantes, concorrência, testes de integração e carga) nas horas finais, com risco alto de regressão, e a garantia pedida pelo enunciado já é atendida pela partida simples com reconciliação.

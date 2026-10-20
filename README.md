@@ -14,7 +14,8 @@ As decisões técnicas, limitações e interpretações estão em **[ARCHITECTUR
 7. [Migrations](#7-migrations)
 8. [Testes](#8-testes)
 9. [Várias instâncias e simulações de falha](#9-várias-instâncias-e-simulações-de-falha)
-10. [Estrutura do projeto](#10-estrutura-do-projeto)
+10. [Observabilidade e teste de carga](#10-observabilidade-e-teste-de-carga)
+11. [Estrutura do projeto](#11-estrutura-do-projeto)
 
 ## 1. Pré-requisitos
 
@@ -26,7 +27,7 @@ As decisões técnicas, limitações e interpretações estão em **[ARCHITECTUR
 | `curl`, `jq`, `uuidgen` | exemplos e script de demonstração |
 | AWS CLI v2 (opcional) | enviar mensagens e ler filas manualmente |
 
-Portas usadas no host: `5432` (PostgreSQL), `8080` (Keycloak), `4566` (MiniStack/SQS) e `8081`–`8083` (as três instâncias da aplicação).
+Portas usadas no host: `5432` (PostgreSQL), `8080` (Keycloak), `4566` (MiniStack/SQS), `8081`–`8083` (as três instâncias da aplicação), `9090` (Prometheus) e `3000` (Grafana).
 
 > No Fedora (SELinux), os volumes do Compose já usam o sufixo `:z`.
 
@@ -46,6 +47,8 @@ Isso sobe, nesta ordem:
 | `queue-init` | cria `wager-transactions.fifo`, `wager-transactions-dlq.fifo` (com redrive) e `wager-events.fifo`, e termina |
 | `migrate` | aplica as migrations e termina |
 | `app` (3 réplicas) | API HTTP, consumidor SQS, worker de referências pendentes e publisher da outbox |
+| `prometheus` | coleta `/metrics` de todas as instâncias |
+| `grafana` | dashboard provisionado (http://localhost:3000) |
 
 Para rodar em segundo plano, use `docker compose up --build -d` (ou `make up`). Para acompanhar, `docker compose ps` (as três instâncias ficam `healthy`) e `docker compose logs -f app`.
 
@@ -272,10 +275,31 @@ Para mudar a quantidade de instâncias: `APP_REPLICAS=1 docker compose up -d` (a
 
 As falhas entre etapas (consumidor caindo depois do commit e antes de apagar a mensagem, publisher caindo entre publicar e confirmar, broker fora do ar) são reproduzidas de forma determinística nos testes de integração do pacote `internal/adapters/sqs`.
 
-## 10. Estrutura do projeto
+## 10. Observabilidade e teste de carga
+
+**Dashboard:** com o ambiente no ar, abra **http://localhost:3000**. O dashboard *testeTecnico: visão geral* é a página inicial e abre sem login (somente leitura; para explorar consultas no Grafana, entre com `admin`/`admin`). Painéis:
+
+| Grupo | O que mostra |
+|---|---|
+| Resumo | instâncias no ar, operações/s, latência p99, atraso da outbox, mensagens na DLQ no período e divergências de saldo |
+| Operações | vazão por origem e status, latência p50/p95/p99, erros por motivo, duplicatas (replays e mensagens repetidas) e conflitos de concorrência |
+| Mensageria | mensagens SQS por desfecho (processed, duplicate, retry, dlq), publicação da outbox (publicados e falhas), atraso e pendentes da outbox, referências pendentes e reconciliação |
+| Instâncias | disponibilidade, goroutines e memória por instância |
+
+O Prometheus (http://localhost:9090) descobre as instâncias pelo DNS do Compose (`dns_sd_configs` com o nome do serviço `app`), então funciona com qualquer número de réplicas. As métricas expostas estão em [ARCHITECTURE.md, seção 14](ARCHITECTURE.md#14-observabilidade).
+
+**Teste de carga** (ambiente no ar; gera relatórios em `docs/`):
+```bash
+make loadtest       # 60s, 50 requisições simultâneas, 100 carteiras
+make loadtest-hot   # 30s, 50 requisições simultâneas, 1 carteira (disputa máxima)
+```
+Para acompanhar ao vivo, deixe o dashboard aberto durante a carga. Metodologia, resultados e a análise do gargalo encontrado na outbox estão em [docs/LOAD_TEST.md](docs/LOAD_TEST.md).
+
+## 11. Estrutura do projeto
 
 ```
 cmd/app/                  ponto de entrada (app, app migrate, app healthcheck)
+cmd/loadtest/             gerador do teste de carga
 internal/domain/          money, wallet, wager, ledger, event (sem dependências externas)
 internal/app/             casos de uso e portas
 internal/adapters/        postgres, httpapi, auth, sqs
@@ -283,6 +307,7 @@ internal/platform/        config, fxapp (composição Fx), metrics
 internal/e2e/             testes ponta a ponta de autenticação e autorização
 internal/testsupport/     PostgreSQL em container para os testes
 migrations/               schema (goose)
-deploy/                   realm do Keycloak e criação das filas
+deploy/                   realm do Keycloak, criação das filas, Prometheus e Grafana
+docs/                     teste de carga: metodologia, análise e relatórios
 scripts/                  demonstração com 3 instâncias
 ```
