@@ -404,6 +404,11 @@ func scrape(client *http.Client, target string) map[string]float64 {
 			out[name] = v
 		}
 	}
+	if err := sc.Err(); err != nil {
+		// Leitura interrompida no meio: as métricas lidas podem estar
+		// incompletas, então o aviso deixa isso visível no relatório.
+		fmt.Fprintf(os.Stderr, "aviso: leitura de %s/metrics interrompida: %v\n", target, err)
+	}
 	return out
 }
 
@@ -443,6 +448,9 @@ func cpuModel() string {
 		if k, v, ok := strings.Cut(sc.Text(), ":"); ok && strings.TrimSpace(k) == "model name" {
 			return strings.TrimSpace(v)
 		}
+	}
+	if err := sc.Err(); err != nil {
+		fmt.Fprintf(os.Stderr, "aviso: leitura de /proc/cpuinfo interrompida: %v\n", err)
 	}
 	return runtime.GOARCH
 }
