@@ -32,7 +32,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-app}
       POSTGRES_DB: ${POSTGRES_DB:-testetecnico}
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -74,7 +74,7 @@ services:
     image: ministackorg/ministack:1.5.29
     restart: unless-stopped
     ports:
-      - "4566:4566"
+      - "${MINISTACK_PORT:-4566}:4566"
 
   # Uso único: cria as filas FIFO e a DLQ no MiniStack e termina.
   queue-init:
@@ -146,7 +146,7 @@ services:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.retention.time=2d
     ports:
-      - "9090:9090"
+      - "${PROMETHEUS_PORT:-9090}:9090"
     volumes:
       - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro,z
     depends_on:
@@ -163,7 +163,7 @@ services:
       GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
       GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /etc/grafana/dashboards/testetecnico.json
     ports:
-      - "3000:3000"
+      - "${GRAFANA_PORT:-3000}:3000"
     volumes:
       - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro,z
       - ./deploy/grafana/dashboards:/etc/grafana/dashboards:ro,z

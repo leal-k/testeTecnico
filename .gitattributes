@@ -1,0 +1,9 @@
+# Scripts e arquivos lidos por shell sempre com fim de linha LF, mesmo quando o
+# repositório é clonado pelo Git do Windows (core.autocrlf): com CRLF, o bash
+# e o sh dos containers quebram.
+*.sh       text eol=lf
+Makefile   text eol=lf
+*.yml      text eol=lf
+*.json     text eol=lf
+*.sql      text eol=lf
+*.go       text eol=lf

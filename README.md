@@ -28,9 +28,9 @@ As decisões técnicas, limitações e interpretações estão em **[ARCHITECTUR
 | `curl`, `jq`, `uuidgen` | exemplos e script de demonstração |
 | AWS CLI v2 (opcional) | enviar mensagens e ler filas manualmente |
 
-Portas usadas no host: `5432` (PostgreSQL), `8080` (Keycloak), `4566` (MiniStack/SQS), `8081`–`8083` (as três instâncias da aplicação), `9090` (Prometheus) e `3000` (Grafana).
+Portas usadas no host: `5432` (PostgreSQL), `8080` (Keycloak), `4566` (MiniStack/SQS), `8081`–`8083` (as três instâncias da aplicação), `9090` (Prometheus) e `3000` (Grafana). As de PostgreSQL, MiniStack, Prometheus e Grafana podem ser trocadas no `.env` (veja [Problemas comuns](#11-problemas-comuns)).
 
-> Linux e macOS funcionam direto. No Windows, use o WSL2 (o `Makefile` e os scripts usam bash). No Fedora (SELinux), os volumes do Compose já usam o sufixo `:z`.
+> Linux e macOS funcionam direto. No Windows, use o WSL2: todos os comandos deste README são de bash e não funcionam no `cmd` nem no PowerShell. No Ubuntu/WSL, as ferramentas da tabela se instalam com `sudo apt install curl jq uuid-runtime make`. No Fedora (SELinux), os volumes do Compose já usam o sufixo `:z`.
 
 ## 2. Subir o ambiente
 
@@ -116,7 +116,7 @@ Os tokens valem 5 minutos. O console do Keycloak fica em http://localhost:8080 (
 
 ## 5. Exemplos de chamadas
 
-As três instâncias são equivalentes; os exemplos usam portas diferentes de propósito.
+**Portas:** `8080` é o Keycloak (onde se pedem os tokens). `8081`, `8082` e `8083` são as **três instâncias da aplicação**: cada container escuta na porta `8080` por dentro, e o Compose expõe cada um numa porta diferente do host. As três rodam o mesmo código e atendem os mesmos endpoints. Os exemplos alternam as portas de propósito: a aposta vai para uma instância, o reenvio para outra e a reversão para uma terceira, e tudo funciona porque nenhum estado fica na memória de uma instância (idempotência, saldos e pendências estão no PostgreSQL). Em produção, um balanceador de carga ficaria na frente, com um endereço só.
 
 **Abrir carteira** (serviço interno):
 ```bash
@@ -188,8 +188,10 @@ aws --endpoint-url http://localhost:4566 sqs list-queues
 MSG="{\"messageId\":\"$(uuidgen)\",\"type\":\"WagerTransactionRequested\",\"occurredAt\":\"$(date -u +%FT%TZ)\",\"data\":{\"providerId\":\"provider-a\",\"externalTransactionId\":\"sqs-1\",\"idempotencyKey\":\"provider-a:sqs-1\",\"playerId\":\"$PLAYER\",\"walletId\":\"$WALLET\",\"roundId\":\"r1\",\"gameId\":\"g1\",\"kind\":\"BET\",\"money\":{\"amount\":\"10.00\",\"currency\":\"BRL\"}}}"
 aws --endpoint-url http://localhost:4566 sqs send-message --queue-url $Q/wager-transactions.fifo \
   --message-body "$MSG" --message-group-id "$WALLET" --message-deduplication-id "$(uuidgen)"
+sleep 3   # o consumo é assíncrono: o envio volta assim que a fila aceita a mensagem
 docker compose logs app | grep '"message handled"' | tail -3
 ```
+O `send-message` só confirma que a **fila** recebeu a mensagem. Uma das instâncias a busca em seguida (long polling de até 10 s) e processa. Por isso, consultar os logs logo depois do envio pode não mostrar nada ainda. Para acompanhar em tempo real, use `docker compose logs -f app | grep '"message handled"'` num segundo terminal.
 Produtores devem usar `MessageGroupId` = ID da carteira e `MessageDeduplicationId` = `messageId`.
 
 **Ler os eventos publicados pela outbox:**
@@ -280,7 +282,7 @@ As falhas entre etapas (consumidor caindo depois do commit e antes de apagar a m
 
 ## 10. Observabilidade e teste de carga
 
-**Dashboard:** com o ambiente no ar, abra **http://localhost:3000**. O dashboard *testeTecnico: visão geral* é a página inicial e abre sem login (somente leitura; para explorar consultas no Grafana, entre com `admin`/`admin`). Painéis:
+**Dashboard:** com o ambiente no ar, abra **http://localhost:3000** (ou a porta definida em `GRAFANA_PORT`). O dashboard *testeTecnico: visão geral* é a página inicial e abre sem login (somente leitura; para explorar consultas no Grafana, entre com `admin`/`admin`). Painéis:
 
 | Grupo | O que mostra |
 |---|---|
@@ -302,7 +304,11 @@ Para acompanhar ao vivo, deixe o dashboard aberto durante a carga. Metodologia, 
 
 | Sintoma | Causa e solução |
 |---|---|
-| `port is already allocated` na subida | outra coisa usa uma das portas (`5432`, `8080`, `4566`, `8081`–`8083`, `9090`, `3000`). Pare o outro serviço, por exemplo um PostgreSQL local (`sudo systemctl stop postgresql`), ou mude o lado do host da porta no `docker-compose.yml` |
+| `port is already allocated` na subida | outra coisa usa uma das portas. Para PostgreSQL, MiniStack, Prometheus e Grafana, troque no `.env` (`cp .env.example .env` e mude `POSTGRES_PORT`, `MINISTACK_PORT`, `PROMETHEUS_PORT` ou `GRAFANA_PORT`, por exemplo `GRAFANA_PORT=3333` se a 3000 estiver com um servidor React) e rode `docker compose up -d` de novo. As portas `8080` (Keycloak; faz parte do emissor dos tokens) e `8081`–`8083` (instâncias) são fixas: pare o serviço que as usa. Se trocar `POSTGRES_PORT` ou `MINISTACK_PORT`, ajuste também as URLs dos comandos que rodam no host (`make migrate-*`, `aws --endpoint-url`) |
+| a demonstração diz que falta `uuidgen`, `jq` ou `curl` | instale: `sudo apt install curl jq uuid-runtime` (Ubuntu/WSL) ou `sudo dnf install curl jq util-linux` (Fedora) |
+| a demonstração diz que uma instância não está pronta | alguma instância `app` não subiu: veja `docker compose ps` e `docker compose logs app` |
+| a mensagem enviada pela fila não aparece nos logs | o consumo é assíncrono; espere alguns segundos ou acompanhe com `docker compose logs -f app` (seção 6) |
+| `bash\r` ou `$'\r': command not found` ao rodar um script | o repositório foi clonado pelo Git do Windows com conversão de fim de linha. O `.gitattributes` evita isso em clones novos; num clone antigo, sem mudanças locais a perder: `git rm -rq --cached . && git reset --hard` |
 | `permission denied` em `/var/run/docker.sock` | o usuário não está no grupo `docker`: `sudo usermod -aG docker $USER` e entrar de novo na sessão |
 | `connection reset by peer` ao pedir token | o Keycloak ainda está subindo; espere ele ficar `healthy` em `docker compose ps` |
 | instâncias `app` não sobem (`dependency failed`) | veja `docker compose logs migrate queue-init keycloak`; para recomeçar do zero, `docker compose down -v` e subir de novo |

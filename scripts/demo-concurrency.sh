@@ -14,6 +14,25 @@ set -euo pipefail
 
 KEYCLOAK=${KEYCLOAK:-http://localhost:8080}
 PORTS=(8081 8082 8083)
+
+# ---- conferências antes de começar: falhar cedo, com uma mensagem clara ----
+missing=()
+for tool in curl jq uuidgen; do
+	command -v "$tool" >/dev/null || missing+=("$tool")
+done
+if ((${#missing[@]})); then
+	echo "Faltam ferramentas: ${missing[*]}" >&2
+	echo "No Ubuntu/WSL: sudo apt install curl jq uuid-runtime   |   no Fedora: sudo dnf install curl jq util-linux" >&2
+	exit 1
+fi
+for port in "${PORTS[@]}"; do
+	if ! curl -sf -o /dev/null --max-time 5 "http://localhost:$port/health/ready"; then
+		echo "A instância em localhost:$port não está pronta (/health/ready)." >&2
+		echo "Confira com 'docker compose ps': keycloak e as três instâncias app devem estar healthy." >&2
+		exit 1
+	fi
+done
+
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
@@ -44,6 +63,7 @@ open_wallet() { # open_wallet <saldo> -> "walletId playerId"
 }
 
 bet() { # bet <porta> <walletId> <playerId> <externalId> <valor> <arquivo-de-saída>
+	: >"$6" # o arquivo existe mesmo se a requisição falhar; a verificação mostra a falha
 	curl -s -o "$6" -w '%{http_code}\n' -X POST "http://localhost:$1/wagering/transactions" \
 		-H "Authorization: Bearer $PROVIDER" -H 'Content-Type: application/json' \
 		-H "Idempotency-Key: provider-a:$4" \
@@ -65,12 +85,17 @@ reconcile() {
 }
 
 echo "Obtendo tokens no Keycloak..."
-INTERNAL=$(token internal-service)
-PROVIDER=$(token provider-a)
+INTERNAL=$(token internal-service) || INTERNAL=""
+PROVIDER=$(token provider-a) || PROVIDER=""
+if [[ -z "$INTERNAL" || "$INTERNAL" == null || -z "$PROVIDER" || "$PROVIDER" == null ]]; then
+	echo "Não foi possível obter os tokens em $KEYCLOAK (o Keycloak está healthy?)." >&2
+	exit 1
+fi
 
 echo
 echo "1) Duas apostas simultâneas de 80.00 sobre 100.00, em instâncias diferentes"
 read -r W1 P1 <<<"$(open_wallet 100.00)"
+[[ -n "$W1" && "$W1" != null ]] || { echo "Não foi possível abrir a carteira." >&2; exit 1; }
 RUN=$(uuidgen | cut -c1-8)
 bet "${PORTS[0]}" "$W1" "$P1" "demo-$RUN-a" 80.00 "$WORK/a" &
 bet "${PORTS[1]}" "$W1" "$P1" "demo-$RUN-b" 80.00 "$WORK/b" &
