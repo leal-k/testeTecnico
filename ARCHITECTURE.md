@@ -117,6 +117,7 @@ A referência é resolvida por `(providerId, referenceExternalTransactionId)` e 
 - **Ordem dos locks:** a inbox é gravada primeiro, depois a carteira é travada, e só então há `INSERT` em `wager_transactions`. A carteira é travada antes de qualquer `INSERT` que a referencie porque a chave estrangeira pega um lock compartilhado na linha da carteira; inserir antes e travar depois faria duas requisições se bloquearem mutuamente (deadlock).
 - **Sem lost update:** além do lock, o `UPDATE` confere a versão lida (`WHERE id = $1 AND version = $4`), e um trigger exige que a versão suba exatamente +1 junto com o saldo.
 - **Disputa pela mesma operação:** se duas requisições idênticas chegam juntas, a segunda espera o lock da carteira e então encontra a transação da primeira (replay). Se ainda assim houver corrida no `INSERT` (por exemplo, a mesma chave em carteiras diferentes), o `INSERT ... ON CONFLICT DO NOTHING` informa que não inseriu; o caso de uso desfaz e refaz a operação (até 3 vezes) e responde como replay. Essas disputas são contadas na métrica `concurrency_conflicts_total`.
+- **Acesso ao banco:** `pgx` v5 com `pgxpool` e SQL escrito à mão, sem ORM nem gerador de código. Cada lock (`FOR UPDATE`, `SKIP LOCKED`), cada `ON CONFLICT` e cada transação aparecem explicitamente no código (`internal/adapters/postgres`), como o enunciado pede. Disputas de unicidade não são tratadas capturando o erro do banco: o `INSERT ... ON CONFLICT DO NOTHING` informa que não inseriu, e o caso de uso decide (replay ou nova tentativa). Os testes de integração tentam violar as constraints diretamente e conferem o `SQLSTATE` devolvido.
 - **Por que `READ COMMITTED` + lock e não `SERIALIZABLE`:** o comportamento é previsível, não há retries de serialização, e o lock dura só uma transação curta.
 
 ### Invariantes impostas pelo banco
@@ -217,6 +218,16 @@ Os testes de integração tentam violar cada uma diretamente por SQL e conferem 
   }
   ```
   Tipo e versão são definidos pelo construtor de cada evento (`internal/domain/event`). O `data` é o snapshot gravado, imutável (trigger). Valores monetários são strings decimais.
+- **Payloads (`data`):**
+
+| Evento | `aggregateType` / `aggregateId` | Campos de `data` |
+|---|---|---|
+| `WagerTransactionProcessed` | `wager_transaction` / ID da transação | `transactionId`, `walletId`, `playerId`, `providerId`\*, `externalTransactionId`\*, `type` (`BET`, `WIN`... ou `OPENING`), `status`, `amount`, `balance` (saldo após a operação), `referenceExternalTransactionId`\* |
+| `WagerTransactionRejected` | `wager_transaction` / ID da transação | os mesmos, com `failureCode` e o `balance` observado no momento da rejeição |
+| `WagerTransactionPendingReference` | `wager_transaction` / ID da transação | os mesmos, com `attempts` e `nextAttemptAt` |
+| `WalletBalanceChanged` | `wallet` / ID da carteira | `walletId`, `transactionId`, `direction` (`DEBIT`/`CREDIT`), `money`, `balanceBefore`, `balanceAfter`, `walletVersion` |
+
+  \* ausentes em eventos de origem interna (`OPENING`), que não têm provedor nem ID externo. Valores monetários seguem o formato `{"amount": "25.00", "currency": "BRL"}`.
 - **Contrato de consumo:** quem consome deve deduplicar pelo `eventId` e, para saldo, ordenar pelo `walletVersion` do `WalletBalanceChanged`.
 
 ## 11. Autenticação e autorização
@@ -349,6 +360,7 @@ Correspondência com a lista do enunciado:
 - `PENDING` não é gravado; operações sem dependência são síncronas (seção 4).
 - `WIN` e `LOSS` aceitam referência opcional a uma `BET`, validada quando informada.
 - O serviço interno não envia operações de aposta; só provedores.
+- **Tipos concretos por evento:** os três eventos de transação (`Processed`, `Rejected`, `PendingReference`) compartilham uma mesma estrutura tipada, porque descrevem o mesmo agregado em estados diferentes; os campos específicos de cada estado (`failureCode`, `attempts`, `nextAttemptAt`) só aparecem quando se aplicam. `WalletBalanceChanged` tem estrutura própria. Cada evento tem tipo e versão definidos por um construtor próprio, que também valida o estado da transação (por exemplo, `TransactionRejected` recusa uma transação que não está `REJECTED`).
 
 **Opcionais do enunciado**
 - **Teste de carga:** implementado (`cmd/loadtest`, `make loadtest`, `make loadtest-hot`); metodologia, resultados e análise em [docs/LOAD_TEST.md](docs/LOAD_TEST.md).

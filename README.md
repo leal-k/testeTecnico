@@ -159,6 +159,10 @@ curl -s -X POST localhost:8081/wagering/transactions \
 curl -s localhost:8081/wallets/$WALLET -H "Authorization: Bearer $INTERNAL" | jq .
 curl -s "localhost:8081/wallets/$WALLET/ledger?limit=50" -H "Authorization: Bearer $INTERNAL" | jq .
 curl -s localhost:8081/providers/provider-a/wagering/transactions/transaction-123 -H "Authorization: Bearer $PROVIDER" | jq .
+
+# pelo ID interno da transação (o provedor só enxerga as próprias; as de outro provedor respondem 404)
+TX=$(curl -s localhost:8081/providers/provider-a/wagering/transactions/transaction-123 -H "Authorization: Bearer $PROVIDER" | jq -r .transactionId)
+curl -s localhost:8081/wagering/transactions/$TX -H "Authorization: Bearer $PROVIDER" | jq .
 ```
 O ledger pagina por cursor opaco: use o `nextCursor` da resposta em `?cursor=...` (ele é `null` na última página).
 
