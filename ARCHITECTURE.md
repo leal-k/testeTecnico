@@ -39,6 +39,7 @@ Cada instância da aplicação roda, no mesmo processo, a API HTTP, o consumidor
 | `internal/adapters/sqs` | Consumidor e publisher SQS | `app` |
 | `internal/platform/config`, `fxapp`, `metrics` | Configuração, composição com Fx, métricas | tudo acima |
 | `cmd/app` | Ponto de entrada (`app`, `app migrate ...`, `app healthcheck`) | `platform` |
+| `cmd/loadtest` | Gerador do teste de carga (cliente HTTP externo, só biblioteca padrão) | nenhum pacote interno |
 
 O domínio não conhece Fx, HTTP, SQS nem a biblioteca do banco. Os casos de uso dependem só de interfaces declaradas no próprio pacote `app` (`Store`, `TxManager`, `OutboxStore`, `EventPublisher`...), e os adaptadores as implementam.
 
@@ -307,6 +308,7 @@ Outras regras: o corpo é decodificado de forma estrita (campos desconhecidos, m
 - **Integração com infraestrutura real** (containers via testcontainers): PostgreSQL com as migrations reais, MiniStack (SQS) e Keycloak com o realm do projeto. Nada da infraestrutura é substituído por mocks nesses testes.
 - **Ponta a ponta** (`internal/e2e`): Keycloak, PostgreSQL e a aplicação montada pelo Fx atendendo HTTP de verdade, com tokens emitidos pelo Keycloak. O realm de teste é o do projeto com a validade do token reduzida a 4 s, para testar um token expirado de verdade.
 - **Concorrência:** os testes de integração usam **três instâncias independentes** (pool de conexões e caso de uso próprios, compartilhando só o banco); `scripts/demo-concurrency.sh` repete os cenários principais contra os **três processos** do Compose.
+- **Carga** (`cmd/loadtest`): centenas de milhares de requisições contra os três processos do Compose, com reenvios misturados, medindo vazão e percentis e conferindo ao final que nenhum reenvio foi reaplicado e que todas as carteiras batem com o ledger ([docs/LOAD_TEST.md](docs/LOAD_TEST.md)).
 - **Ao final dos cenários financeiros**, os testes conferem que o saldo armazenado é igual à soma dos lançamentos do ledger.
 
 Correspondência com a lista do enunciado:

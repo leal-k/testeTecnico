@@ -15,21 +15,22 @@ As decisões técnicas, limitações e interpretações estão em **[ARCHITECTUR
 8. [Testes](#8-testes)
 9. [Várias instâncias e simulações de falha](#9-várias-instâncias-e-simulações-de-falha)
 10. [Observabilidade e teste de carga](#10-observabilidade-e-teste-de-carga)
-11. [Estrutura do projeto](#11-estrutura-do-projeto)
+11. [Problemas comuns](#11-problemas-comuns)
+12. [Estrutura do projeto](#12-estrutura-do-projeto)
 
 ## 1. Pré-requisitos
 
 | Ferramenta | Para quê |
 |---|---|
 | Docker com Docker Compose v2 | ambiente completo e testes de integração |
-| Go 1.26 | rodar os testes e a aplicação fora do Docker |
+| Go 1.26 | testes, teste de carga e a aplicação fora do Docker (o `go.mod` pede 1.26.9; com uma 1.26 anterior, o Go baixa essa versão sozinho) |
 | gcc | `go test -race` (o detector de corridas usa cgo) |
 | `curl`, `jq`, `uuidgen` | exemplos e script de demonstração |
 | AWS CLI v2 (opcional) | enviar mensagens e ler filas manualmente |
 
 Portas usadas no host: `5432` (PostgreSQL), `8080` (Keycloak), `4566` (MiniStack/SQS), `8081`–`8083` (as três instâncias da aplicação), `9090` (Prometheus) e `3000` (Grafana).
 
-> No Fedora (SELinux), os volumes do Compose já usam o sufixo `:z`.
+> Linux e macOS funcionam direto. No Windows, use o WSL2 (o `Makefile` e os scripts usam bash). No Fedora (SELinux), os volumes do Compose já usam o sufixo `:z`.
 
 ## 2. Subir o ambiente
 
@@ -50,7 +51,9 @@ Isso sobe, nesta ordem:
 | `prometheus` | coleta `/metrics` de todas as instâncias |
 | `grafana` | dashboard provisionado (http://localhost:3000) |
 
-Para rodar em segundo plano, use `docker compose up --build -d` (ou `make up`). Para acompanhar, `docker compose ps` (as três instâncias ficam `healthy`) e `docker compose logs -f app`.
+Para rodar em segundo plano, use `docker compose up --build -d` (ou `make up`). A primeira subida baixa as imagens e compila a aplicação, o que leva alguns minutos.
+
+O ambiente está pronto quando `docker compose ps` mostra `postgres`, `keycloak` e as três instâncias `app` como `healthy`. As instâncias só sobem depois de o Keycloak terminar de importar o realm (de 30 s a 1 min numa subida do zero), então daí em diante já dá para pedir tokens. Para acompanhar: `docker compose logs -f app`.
 
 Conferência rápida:
 ```bash
@@ -295,7 +298,18 @@ make loadtest-hot   # 30s, 50 requisições simultâneas, 1 carteira (disputa m�
 ```
 Para acompanhar ao vivo, deixe o dashboard aberto durante a carga. Metodologia, resultados e a análise do gargalo encontrado na outbox estão em [docs/LOAD_TEST.md](docs/LOAD_TEST.md).
 
-## 11. Estrutura do projeto
+## 11. Problemas comuns
+
+| Sintoma | Causa e solução |
+|---|---|
+| `port is already allocated` na subida | outra coisa usa uma das portas (`5432`, `8080`, `4566`, `8081`–`8083`, `9090`, `3000`). Pare o outro serviço, por exemplo um PostgreSQL local (`sudo systemctl stop postgresql`), ou mude o lado do host da porta no `docker-compose.yml` |
+| `permission denied` em `/var/run/docker.sock` | o usuário não está no grupo `docker`: `sudo usermod -aG docker $USER` e entrar de novo na sessão |
+| `connection reset by peer` ao pedir token | o Keycloak ainda está subindo; espere ele ficar `healthy` em `docker compose ps` |
+| instâncias `app` não sobem (`dependency failed`) | veja `docker compose logs migrate queue-init keycloak`; para recomeçar do zero, `docker compose down -v` e subir de novo |
+| testes de integração aparecem como `SKIP` | o Docker não está acessível para o usuário que roda o `go test` |
+| o atraso da outbox só cresce durante o teste de carga | esperado: o MiniStack publica ~130 mensagens/s; veja [docs/LOAD_TEST.md](docs/LOAD_TEST.md) |
+
+## 12. Estrutura do projeto
 
 ```
 cmd/app/                  ponto de entrada (app, app migrate, app healthcheck)

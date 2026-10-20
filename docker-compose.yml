@@ -60,6 +60,15 @@ services:
     volumes:
       # ":z" é necessário no Fedora (SELinux) para o container ler a pasta do host.
       - ./deploy/keycloak:/opt/keycloak/data/import:ro,z
+    # Pronto só depois de importar o realm. A imagem não tem curl: o teste usa
+    # o /dev/tcp do bash para pedir /health/ready na porta de gerenciamento
+    # (9000) e confere se a resposta é 200.
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/9000 && printf 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && read -r line <&3 && [[ $$line == *' 200 '* ]]"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 30s
 
   ministack:
     image: ministackorg/ministack:1.5.29
@@ -69,7 +78,7 @@ services:
 
   # Uso único: cria as filas FIFO e a DLQ no MiniStack e termina.
   queue-init:
-    image: amazon/aws-cli:latest
+    image: amazon/aws-cli:2.38.1
     depends_on:
       - ministack
     environment:
@@ -113,8 +122,10 @@ services:
         condition: service_completed_successfully
       queue-init:
         condition: service_completed_successfully
+      # Com o Keycloak pronto antes, "as três instâncias healthy" significa
+      # ambiente inteiro pronto para pedir tokens.
       keycloak:
-        condition: service_started
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "/app", "healthcheck"]
       interval: 5s
