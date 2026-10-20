@@ -253,6 +253,7 @@ go test -short ./...   # só os unitários (sem containers)
 | `internal/adapters/httpapi` | contrato HTTP, permissões, códigos de erro, logs |
 | `internal/adapters/auth` | validação de tokens (IdP falso com RSA real) |
 | `internal/platform/fxapp` | composição Fx, início, encerramento e retomada entre instâncias |
+| `internal/testsupport/pgtest` | migrations nos dois sentidos: todas sobem, todas revertem (versão 0, sem tabelas) e sobem de novo |
 | `internal/e2e` | ponta a ponta com Keycloak, PostgreSQL e a aplicação HTTP reais: credenciais ausentes, inválidas, adulteradas e expiradas; isolamento entre provedores em consultas e replays; restrição das operações internas; nenhum efeito financeiro em acessos recusados |
 
 **Teste extra contra o Keycloak do Compose** (opcional, com o ambiente de pé):
