@@ -1,4 +1,4 @@
-# Arquitetura
+# Arquitetura da Carteira de Apostas
 
 Este documento registra as decisões técnicas da solução, com o motivo de cada uma, as interpretações adotadas onde o enunciado deixava margem, as limitações conhecidas e o que não foi feito.
 

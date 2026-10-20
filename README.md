@@ -1,8 +1,10 @@
-# testeTecnico: processamento distribuído de apostas em Go
+# Carteira de Apostas
 
 Serviço em Go (Uber Fx) que movimenta carteiras de jogadores a partir de operações de provedores de jogos (`BET`, `WIN`, `LOSS`, `REFUND`, `ROLLBACK`), recebidas por **API HTTP** e por **fila SQS**, com as mesmas garantias nos dois caminhos: dinheiro exato, ledger imutável, idempotência persistente, coordenação por carteira entre várias instâncias, inbox, transactional outbox e autenticação com Keycloak.
 
 As decisões técnicas, limitações e interpretações estão em **[ARCHITECTURE.md](ARCHITECTURE.md)**.
+
+> O repositório se chama `testeTecnico` por ser a entrega de um teste técnico. Por isso esse nome aparece no caminho do módulo Go e nos identificadores técnicos: realm do Keycloak, banco de dados, prefixo das métricas e nomes dos containers.
 
 ## Sumário
 1. [Pré-requisitos](#1-pré-requisitos)
@@ -282,7 +284,7 @@ As falhas entre etapas (consumidor caindo depois do commit e antes de apagar a m
 
 ## 10. Observabilidade e teste de carga
 
-**Dashboard:** com o ambiente no ar, abra **http://localhost:3000** (ou a porta definida em `GRAFANA_PORT`). O dashboard *testeTecnico: visão geral* é a página inicial e abre sem login (somente leitura; para explorar consultas no Grafana, entre com `admin`/`admin`). Painéis:
+**Dashboard:** com o ambiente no ar, abra **http://localhost:3000** (ou a porta definida em `GRAFANA_PORT`). O dashboard *Carteira de Apostas: visão geral* é a página inicial e abre sem login (somente leitura; para explorar consultas no Grafana, entre com `admin`/`admin`). Painéis:
 
 | Grupo | O que mostra |
 |---|---|

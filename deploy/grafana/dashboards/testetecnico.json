@@ -1,6 +1,6 @@
 {
   "uid": "testetecnico-overview",
-  "title": "testeTecnico: visão geral",
+  "title": "Carteira de Apostas: visão geral",
   "description": "Operações, latência, concorrência, SQS, outbox e instâncias.",
   "tags": [
     "testetecnico"
